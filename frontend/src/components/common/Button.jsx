@@ -53,7 +53,7 @@ export function Button({
     classes.push(
       "border border-primary",
       "text-primary",
-      "hover:bg-surface_2",
+      "hover:bg-surface",
       "focus-visible:ring-primary",
       "bg-white"
     )

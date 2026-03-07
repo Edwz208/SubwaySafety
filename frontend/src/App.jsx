@@ -33,7 +33,8 @@ function App() {
           <Route path="/" element={<Home/>}/>
 
           {/* Private Routes />*/}
-          <Route />
+          <Route element={<PersistentLogin />}>
+          </Route>
 
         </Routes>
       </main>
