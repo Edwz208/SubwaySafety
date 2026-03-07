@@ -1,0 +1,110 @@
+File structure (for YOLOv8):
+transit-guardian/
+│
+├── backend/                        # FastAPI (Python)
+│   ├── main.py                     # App entry point, CORS, mounts routers
+│   ├── requirements.txt
+│   │
+│   ├── routers/
+│   │   ├── analyze.py              # POST /analyze — accepts frame, returns detections
+│   │   └── alerts.py               # POST /alert — saves confirmed alert to DB
+│   │
+│   ├── detection/
+│   │   ├── model.py                # Loads YOLOv8-Pose model (singleton, loads once)
+│   │   ├── classifiers.py          # ← YOUR CUSTOM EVENT LOGIC LIVES HERE
+│   │   ├── tracker.py              # Motion history per person (deque per track_id)
+│   │   └── annotator.py            # Draws boxes/labels onto frame for dashboard
+│   │
+│   ├── schemas/
+│   │   └── detection.py            # Pydantic models: FrameRequest, DetectionResponse, etc.
+│   │
+│   └── db/
+│       └── incidents.py            # SQLite / simple JSON file — stores alert history
+│
+├── node-server/                    # Node.js Socket.io layer
+│   ├── index.js                    # Express + Socket.io server
+│   ├── alertQueue.js               # Deduplication — don't re-alert same person every frame
+│   └── package.json
+│
+└── frontend/                       # React (Vite)
+    ├── src/
+    │   ├── main.jsx
+    │   ├── App.jsx
+    │   │
+    │   ├── components/
+    │   │   ├── CameraFeed.jsx      # Webcam → canvas → sends frames to FastAPI
+    │   │   ├── AlertPanel.jsx      # Live list of incoming alerts
+    │   │   ├── IncidentCard.jsx    # Single alert: snapshot + events + severity
+    │   │   └── Heatmap.jsx         # Station floor plan with incident counts
+    │   │
+    │   ├── hooks/
+    │   │   ├── useCamera.js        # getUserMedia, frame extraction at interval
+    │   │   ├── useDetection.js     # Polls FastAPI with frames, returns results
+    │   │   └── useSocket.js        # Connects to Node Socket.io, listens for alerts
+    │   │
+    │   └── store/
+    │       └── alertStore.js       # Zustand store — incidents[], activeCameras[]
+    │
+    └── package.json
+
+
+For every frame (per person), they have a 'bounding box' recording their coordinates in the x & y plane, along with 17 key points.
+Bounding box = [x1, x2, y1, y2]
+  - A box that encircles their entire body. 
+Keypoint index map:
+0: nose          1: left_eye       2: right_eye
+3: left_ear      4: right_ear      5: left_shoulder
+6: right_shoulder  7: left_elbow   8: right_elbow
+9: left_wrist    10: right_wrist  11: left_hip
+12: right_hip    13: left_knee    14: right_knee
+15: left_ankle   16: right_ankle
+
+The logic will be stored in classifiers.py. 
+Data flow:
+Webcam (React)
+  → useCamera.js extracts frame every 2s
+  → useDetection.js POSTs base64 frame to FastAPI /analyze
+  → FastAPI runs YOLOv8 → classifiers.py → returns events JSON
+  → React receives result → if alert, POSTs to Node server
+  → Node Socket.io broadcasts to ALL connected dashboards
+  → AlertPanel.jsx renders the alert in real time
+
+Event 1: Lying Down / Fallen
+  When standing:  bounding box height >> width  (tall)
+  When lying:     bounding box width >> height  (wide)
+  
+  Rule: if (box_width / box_height) > 1.4  →  LYING_DOWN
+  
+  Stronger check: are shoulder_y, hip_y, and ankle_y all roughly equal?
+  If yes → person is horizontal → FALLEN
+
+Event 2: Not Moving / Stationary
+  YOLOv8-Pose has built-in tracking (model.track()) which assigns a stable ID to each person across frames. Use this.
+  For each person_id, keep a list of their (timestamp, x, y) center positions.
+  
+  Every frame, check:
+    total distance moved in last 15 seconds < 20 pixels?
+    → STATIONARY alert
+  
+  This lives in tracker.py — a dict of deques, keyed by track_id.
+
+Event 3: Erratic Movement
+  Opposite of stationary — person is moving a LOT but inconsistently.
+  
+  Calculate frame-to-frame movement deltas from the position history.
+    mean_delta = average pixels moved per frame
+    std_delta  = how variable those movements are
+  
+  If mean_delta > 10 AND (std_delta / mean_delta) > 0.8  →  ERRATIC
+  
+  High variance relative to mean = chaotic, unpredictable movement.
+
+Event 5: Crouching / Hunched Over
+  Compare nose_y to hip_y.
+  
+  When standing:  nose_y is much higher (lower number) than hip_y
+  When crouched:  nose_y approaches hip_y
+  
+  Rule: if (hip_y - nose_y) < 0.3 * bounding_box_height  →  CROUCHING
+  
+  Useful for detecting someone collapsed against a wall or doubled over.
