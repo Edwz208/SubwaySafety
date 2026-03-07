@@ -25,8 +25,8 @@ from collections import deque
 
 CFG = {
     # Lying down / fallen
-    "LYING_ASPECT_RATIO":       1.4,   # bbox width/height ratio to flag as horizontal
-    "LYING_KP_Y_TOLERANCE":     0.6,   # keypoints Y-spread as fraction of bbox height
+    "LYING_ASPECT_RATIO":       1.6,   # bbox width/height ratio to flag as horizontal
+    "LYING_KP_Y_TOLERANCE":     0.5,   # keypoints Y-spread as fraction of bbox height
 
     # Stationary
     "STATIONARY_SECONDS":       10,    # seconds without movement to trigger alert
@@ -34,8 +34,8 @@ CFG = {
     "HISTORY_WINDOW_SECONDS":   15,    # how long to keep position history
 
     # Erratic movement
-    "ERRATIC_MIN_DELTA":        8,     # minimum avg pixels/frame to count as moving
-    "ERRATIC_CV_THRESHOLD":     0.8,   # coefficient of variation (chaos level)
+    "ERRATIC_MIN_DELTA":        5,     # minimum avg pixels/frame to count as moving
+    "ERRATIC_CV_THRESHOLD":     0.6,   # coefficient of variation (chaos level)
 
     # Near restricted zone (train tracks)
     "TRACKS_ZONE_Y":            0.85,  # anything below this Y% = restricted zone
@@ -153,9 +153,9 @@ def detect_lying_down(
     if signal_a and signal_b:
         confidence = min(1.0, aspect_ratio / 2.0)
     elif signal_a:
-        confidence = min(0.75, aspect_ratio / 2.5)
+        confidence = min(0.65, aspect_ratio / 2.5)
     else:
-        confidence = 0.55
+        confidence = 0.45
 
     meta = {
         "aspect_ratio": round(aspect_ratio, 2),
@@ -426,4 +426,5 @@ def run_all_classifiers(
         "events": events,
         "severity": severity,
         "details": details,
+
     }
