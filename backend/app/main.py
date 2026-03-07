@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from routers.login import router as login_router
+from routers.testing import router as test_router
 
 app = FastAPI()
 
@@ -14,3 +15,4 @@ app.add_middleware(
 ) 
 
 app.include_router(login_router)
+app.include_router(test_router)
