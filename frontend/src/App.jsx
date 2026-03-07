@@ -5,6 +5,7 @@ import useStore from './contexts/store.js'
 import Header from './components/layout/Header.jsx'
 import Footer from './components/layout/Footer.jsx'
 import Home from './pages/Home.jsx'
+import PersistentLogin from './components/PersistentLogin.jsx'
 
 function App() {
 

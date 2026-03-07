@@ -12,10 +12,10 @@ def generate_gemini_response() -> Optional[str]:
     return response.text
 
 def analyze_video(video_url: str) -> Any:
-    BASE_DIR = Path(__file__).resolve().parent.parent
-    myfile = client.files.upload(file=str(BASE_DIR / video_url))
+    print("analyzing...")
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+    myfile = client.files.upload(file=str(BASE_DIR / "videos" / video_url))
     response = client.models.generate_content(
         model="gemini-3-flash-preview", contents=[myfile, "Summarize this video. Then create a quiz with an answer key based on the information in this video."]
     )
-
     print(response.text)
