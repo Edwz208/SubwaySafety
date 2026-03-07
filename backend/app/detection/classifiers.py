@@ -248,25 +248,59 @@ def detect_aggression(
     bbox: list[float],
 ) -> tuple[bool, float, dict]:
     """
-    Detects a punch by requiring TWO simultaneous signals:
-
-    1. SPEED — wrist moved fast in last 0.3s (normalized by bbox height).
-       Walking speed: ~0.3-0.5 body-heights/sec wrist movement.
-       Punch speed:   ~0.8-2.0 body-heights/sec.
-
-    2. ARM GEOMETRY — elbow is extended (>145°, nearly straight).
-       Walking: elbows stay bent (~90-120°).
-       Punching: elbow straightens toward 180°.
-       Asymmetry: one arm punching, other arm in guard = big angle difference.
-
-    Both required together → eliminates false positives from normal movement.
-    Geometry alone (no speed data) → low confidence fallback for motion-blur frames.
+    Punch = fast wrist speed AND extended elbow. BOTH required, no exceptions.
+    Geometry-only fallback removed — it fired on any natural arm asymmetry.
     """
     x1, y1, x2, y2 = bbox
     box_h = max(y2 - y1, 1.0)
     MIN_CONF = CFG["MIN_KP_CONFIDENCE"]
 
-    # ── Geometry: compute elbow angles ───────────────────────────────────────
+    # ── Step 1: Check speed first — exit early if wrists aren't moving fast ──
+    # No point checking geometry if there's no speed
+    wrist_speed_norm = 0.0
+    speed_source     = "none"
+
+    if track_id not in motion_history:
+        return False, 0.0, {}
+
+    history = list(motion_history[track_id])
+    if len(history) < 2:
+        return False, 0.0, {}
+
+    now    = history[-1][0]
+    recent = [h for h in history if now - h[0] <= 0.25]  # 0.25s window
+    if len(recent) < 2:
+        return False, 0.0, {}
+
+    time_span = max(recent[-1][0] - recent[0][0], 0.01)
+
+    def disp_norm(ax, ay, bx, by):
+        return np.sqrt((bx - ax)**2 + (by - ay)**2) / time_span / box_h
+
+    lw_start = next(((h[4], h[5]) for h in recent          if h[4] is not None), None)
+    lw_end   = next(((h[4], h[5]) for h in reversed(recent) if h[4] is not None), None)
+    if lw_start and lw_end and lw_start != lw_end:
+        spd = disp_norm(lw_start[0], lw_start[1], lw_end[0], lw_end[1])
+        if spd > wrist_speed_norm:
+            wrist_speed_norm = spd
+            speed_source     = "left_wrist"
+
+    rw_start = next(((h[6], h[7]) for h in recent          if h[6] is not None), None)
+    rw_end   = next(((h[6], h[7]) for h in reversed(recent) if h[6] is not None), None)
+    if rw_start and rw_end and rw_start != rw_end:
+        spd = disp_norm(rw_start[0], rw_start[1], rw_end[0], rw_end[1])
+        if spd > wrist_speed_norm:
+            wrist_speed_norm = spd
+            speed_source     = "right_wrist"
+
+    # Hard speed gate — must clear this or we don't even check geometry
+    # 1.5 = wrist travels 1.5x body height per second
+    # Normal walking wrist swing: ~0.3-0.6. Fast arm wave: ~0.8. Punch: 1.5+
+    SPEED_THRESH = 1.5
+    if wrist_speed_norm < SPEED_THRESH:
+        return False, 0.0, {}
+
+    # ── Step 2: Speed cleared — now verify arm is actually extended ──────────
     l_shoulder = kp(keypoints, 5)
     r_shoulder = kp(keypoints, 6)
     l_elbow    = kp(keypoints, 7)
@@ -289,84 +323,24 @@ def detect_aggression(
         (r_wrist[0],    r_wrist[1]),
     ) if right_chain else None
 
-    ANGLE_THRESH  = CFG["PUNCH_ELBOW_ANGLE"]
+    ANGLE_THRESH   = 140  # degrees — lowered slightly since speed gate is now strict
     left_extended  = left_angle  is not None and left_angle  > ANGLE_THRESH
     right_extended = right_angle is not None and right_angle > ANGLE_THRESH
-    arm_extended   = left_extended or right_extended
 
-    # One arm extended, other bent = punching guard posture
-    asymmetric = (
-        left_angle is not None and right_angle is not None and
-        abs(left_angle - right_angle) > CFG["PUNCH_ASYMMETRY_DEG"]
-    )
-
-    # No arm extension at all = definitely not a punch, exit early
-    if not arm_extended:
+    if not (left_extended or right_extended):
+        # Fast wrist but no arm extension = vigorous waving, not punching
         return False, 0.0, {}
 
-    # ── Speed: wrist displacement over last 0.3s ─────────────────────────────
-    wrist_speed_norm = 0.0
-    speed_source     = "none"
-
-    if track_id in motion_history:
-        history = list(motion_history[track_id])
-        if len(history) >= 2:
-            now    = history[-1][0]
-            recent = [h for h in history if now - h[0] <= 0.3]
-            if len(recent) >= 2:
-                time_span = max(recent[-1][0] - recent[0][0], 0.01)
-
-                def disp_per_sec(ax, ay, bx, by):
-                    return np.sqrt((bx - ax)**2 + (by - ay)**2) / time_span / box_h
-
-                lw_start = next(((h[4], h[5]) for h in recent           if h[4] is not None), None)
-                lw_end   = next(((h[4], h[5]) for h in reversed(recent)  if h[4] is not None), None)
-                if lw_start and lw_end and lw_start != lw_end:
-                    spd = disp_per_sec(lw_start[0], lw_start[1], lw_end[0], lw_end[1])
-                    if spd > wrist_speed_norm:
-                        wrist_speed_norm = spd
-                        speed_source     = "left_wrist"
-
-                rw_start = next(((h[6], h[7]) for h in recent           if h[6] is not None), None)
-                rw_end   = next(((h[6], h[7]) for h in reversed(recent)  if h[6] is not None), None)
-                if rw_start and rw_end and rw_start != rw_end:
-                    spd = disp_per_sec(rw_start[0], rw_start[1], rw_end[0], rw_end[1])
-                    if spd > wrist_speed_norm:
-                        wrist_speed_norm = spd
-                        speed_source     = "right_wrist"
-
-    SPEED_THRESH   = CFG["PUNCH_WRIST_SPEED_NORM"]
-    speed_detected = wrist_speed_norm >= SPEED_THRESH
-
-    # ── Decision ─────────────────────────────────────────────────────────────
-    if speed_detected:
-        # Speed + geometry = full punch confirmation
-        base = 0.55 + min(0.3, (wrist_speed_norm - SPEED_THRESH) * 0.2)
-        confidence = min(1.0, base + (0.15 if asymmetric else 0))
-        trigger = "speed+geometry"
-
-    elif asymmetric:
-        # No speed (wrist keypoints lost to blur) but geometry is strong
-        max_angle = max(a for a in [left_angle, right_angle] if a is not None)
-        base = 0.35 + (max_angle - ANGLE_THRESH) / (180 - ANGLE_THRESH) * 0.3
-        confidence = min(0.65, base)
-        trigger = "geometry_only"
-
-    else:
-        # Extended arm but no speed and no asymmetry = just stretching/reaching
-        return False, 0.0, {}
+    # ── Both gates cleared: fast wrist + extended elbow = punch ─────────────
+    confidence = min(1.0, 0.55 + (wrist_speed_norm - SPEED_THRESH) * 0.15)
 
     meta = {
         "left_elbow_angle":  round(left_angle,  1) if left_angle  is not None else None,
         "right_elbow_angle": round(right_angle, 1) if right_angle is not None else None,
         "wrist_speed_norm":  round(wrist_speed_norm, 3),
-        "arm_extended":      arm_extended,
-        "asymmetric":        asymmetric,
-        "trigger":           trigger,
         "speed_source":      speed_source,
     }
     return True, round(confidence, 2), meta
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EVENT 4 — ERRATIC MOVEMENT
@@ -549,5 +523,6 @@ def run_all_classifiers(
         "severity": severity,
         "details":  details,
     }
+
 
 
