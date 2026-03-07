@@ -99,3 +99,9 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
+
+for box, kps in zip(results[0].boxes, results[0].keypoints.data):
+    kps_np = kps.cpu().numpy()
+    lw = kps_np[9]   # left wrist
+    rw = kps_np[10]  # right wrist
+    print(f"LW: ({lw[0]:.0f}, {lw[1]:.0f}) conf={lw[2]:.2f} | RW: ({rw[0]:.0f}, {rw[1]:.0f}) conf={rw[2]:.2f}")
