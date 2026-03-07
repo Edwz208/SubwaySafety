@@ -250,7 +250,7 @@ def detect_erratic_movement(track_id: int) -> tuple[bool, float, dict]:
     for i in range(1, len(history)):
         dx = history[i][1] - history[i-1][1]  # x delta
         dy = history[i][2] - history[i-1][2]  # y delta
-        deltas.append(np.sqrt(dx**2 + dy**2))
+        deltas.append(np.sqrt(dx**2 + dy**2) / avg_bbox_h)
 
     mean_delta = float(np.mean(deltas))
     std_delta = float(np.std(deltas))
@@ -428,3 +428,4 @@ def run_all_classifiers(
         "details": details,
 
     }
+
