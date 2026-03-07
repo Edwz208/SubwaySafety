@@ -1,68 +1,105 @@
 # test_visual.py
-# Run this from backend/ folder:  python test_visual.py
-# Press Q to quit, SPACE to pause
-
-# test_visual.py
-# Run this from backend/ folder:  python test_visual.py
-# Press Q to quit, SPACE to pause, S = screenshot
+# Run from backend/ folder: python test_visual.py
+# Controls: Q = quit | SPACE = pause | S = screenshot
 
 import cv2
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "app"))
-from detection.model import get_model
-from detection import tracker, classifiers, annotator
+from detection.model         import get_model
+from detection               import tracker, classifiers, annotator
+from detection.clip_recorder import get_recorder
+from detection.clip_recorder import CLIPS_DIR
+import detection.clip_recorder as _cr
+print(f"clip_recorder file: {_cr.__file__}")
+print(f"CLIPS_DIR: {_cr.CLIPS_DIR}")
+print(f"Clips will save to: {CLIPS_DIR}")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-VIDEO_SOURCE = 0          # 0 = webcam, or "path/to/video.mp4"
-
-# Set this to match your camera mount:
-#   "horizontal" = wall / eye-level / angled mount
-#   "topdown"    = ceiling mount (~90 degrees)
-CAMERA_ANGLE = "horizontal"
-
+VIDEO_SOURCE           = 0              # 0 = webcam
+CAMERA_ANGLE           = "horizontal"
+CAMERA_ID              = "webcam"       # used as prefix in clip filenames
+ALERT_COOLDOWN_SECONDS = 20
 # ─────────────────────────────────────────────────────────────────────────────
 
 model  = get_model()
 cap    = cv2.VideoCapture(VIDEO_SOURCE)
 paused = False
 
-print("Controls: Q = quit | SPACE = pause | S = save screenshot")
+last_alert_time: dict[int, float] = {}
+
+print("Controls: Q = quit | SPACE = pause | S = screenshot")
+print(f"Clips will be saved to: {os.path.abspath('clips')}")
+
+# ── Grab one frame to get dimensions ─────────────────────────────────────────
+ret, frame = cap.read()
+if not ret:
+    print("Could not open camera")
+    sys.exit(1)
+
+frame_h, frame_w = frame.shape[:2]
+recorder = get_recorder(CAMERA_ID, fps=15)
+
+print(f"Frame size: {frame_w}x{frame_h}")
 
 while cap.isOpened():
+
+    # ── Read frame ────────────────────────────────────────────────────────────
     if not paused:
         ret, frame = cap.read()
         if not ret:
             print("Video ended")
             break
 
-    frame_h, frame_w = frame.shape[:2]
+    # ── Always feed frame into clip buffer ────────────────────────────────────
+    # This MUST be outside the detection block and happen every frame
+    # Without this the pre-alert buffer will be empty and clips have no footage
+    recorder.add_frame(frame)
 
-    results = model.track(frame, persist=True, verbose=False, conf=0.35)
-
+    # ── Run YOLOv8 ───────────────────────────────────────────────────────────
+    results    = model.track(frame, persist=True, verbose=False, conf=0.35)
     detections = []
     active_ids = []
 
     if results and results[0].boxes is not None and results[0].keypoints is not None:
         for box, kps in zip(results[0].boxes, results[0].keypoints.data):
+
             track_id = int(box.id[0]) if box.id is not None else 0
             bbox     = box.xyxy[0].tolist()
             kps_np   = kps.cpu().numpy()
+            cx       = (bbox[0] + bbox[2]) / 2
+            cy       = (bbox[1] + bbox[3]) / 2
+            box_h    = bbox[3] - bbox[1]
 
-            cx    = (bbox[0] + bbox[2]) / 2
-            cy    = (bbox[1] + bbox[3]) / 2
-            box_h = bbox[3] - bbox[1]
-
-            # ── BUG FIX: this was missing entirely — erratic/aggression had no data ──
             classifiers.update_motion_history(track_id, cx, cy, box_h, kps_np)
-
             active_ids.append(track_id)
 
             result = classifiers.run_all_classifiers(
                 kps_np, bbox, track_id, frame_w, frame_h,
                 camera_angle=CAMERA_ANGLE,
             )
+
+            # ── Trigger clip on critical alert ────────────────────────────────
+            if result["severity"] == "critical":
+                now  = time.time()
+                last = last_alert_time.get(track_id, 0)
+
+                if now - last > ALERT_COOLDOWN_SECONDS:
+                    last_alert_time[track_id] = now
+
+                    clip_file = recorder.trigger_clip(
+                        alert_event = result["events"][0],
+                        severity    = result["severity"],
+                        frame_w     = frame_w,
+                        frame_h     = frame_h,
+                    )
+
+                    if clip_file:
+                        print(f"\n🚨 CRITICAL ALERT | track={track_id} | events={result['events']}")
+                        print(f"   📹 Clip: {clip_file}")
+                        print(f"   📂 Saved to: clips/{clip_file}\n")
 
             detections.append({
                 "track_id":  track_id,
@@ -74,20 +111,20 @@ while cap.isOpened():
     classifiers.clear_stale_tracks(active_ids)
     tracker.clear_stale(active_ids)
 
+    # ── Annotate and show ─────────────────────────────────────────────────────
     annotated = annotator.annotate_frame(frame, detections)
 
     for d in detections:
         if d.get("skipped"):
             continue
-        x1, y1, x2, y2 = d["bbox"]
-        box_w = x2 - x1
-        box_h = max(y2 - y1, 1)
-        aspect = round(box_w / box_h, 2)
-        if d["events"]:  # only print when something is detected
-            print(f"  ID:{d['track_id']} | aspect={aspect} | events={d['events']} | sev={d['severity']} | details={d['details']}")
+        if d["events"]:
+            x1, y1, x2, y2 = d["bbox"]
+            aspect = round((x2 - x1) / max(y2 - y1, 1), 2)
+            print(f"  ID:{d['track_id']} | aspect={aspect} | {d['events']} | {d['severity']}")
 
-    cv2.imshow("Transit Guardian - Detection Test", annotated)
+    cv2.imshow("Transit Guardian", annotated)
     key = cv2.waitKey(1) & 0xFF
+
     if key == ord("q"):
         break
     elif key == ord(" "):
@@ -99,9 +136,4 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
-
-for box, kps in zip(results[0].boxes, results[0].keypoints.data):
-    kps_np = kps.cpu().numpy()
-    lw = kps_np[9]   # left wrist
-    rw = kps_np[10]  # right wrist
-    print(f"LW: ({lw[0]:.0f}, {lw[1]:.0f}) conf={lw[2]:.2f} | RW: ({rw[0]:.0f}, {rw[1]:.0f}) conf={rw[2]:.2f}")
+print("Done.")
