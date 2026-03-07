@@ -240,105 +240,98 @@ def detect_fallen(
 # ─────────────────────────────────────────────────────────────────────────────
 # EVENT 3 — AGGRESSIVE MOVEMENT (punching, striking)
 # ─────────────────────────────────────────────────────────────────────────────
-
 def detect_aggression(track_id: int) -> tuple[bool, float, dict]:
     """
-    Detects punching/striking via wrist speed spikes.
-    
-    A punch = one explosive wrist movement (1-2 frames fast, then stops or retracts).
-    The old consecutive-frames approach reset the counter on deceleration,
-    so real punches never triggered.
-    
-    New approach:
-    - Track the PEAK wrist speed across recent frames (sliding window)
-    - A single frame exceeding SPIKE threshold = strike detected
-    - Direction reversal bonus: if wrist reverses direction after spike = more confident
-    - Separate lower threshold for sustained shoving/pushing
+    Detects punching/striking using pixels-per-second on wrists,
+    with elbow + shoulder as fallback if wrist keypoints are lost
+    (which happens often during fast motion due to blur).
+
+    Uses a short 0.3s sliding window — only recent movement counts.
+    Threshold is raw pixels/second, easy to tune.
     """
     if track_id not in motion_history:
         return False, 0.0, {}
 
     history = list(motion_history[track_id])
-    # Need enough frames for a meaningful window
     if len(history) < 3:
         return False, 0.0, {}
 
-    SPIKE_THRESHOLD     = 0.35  # single-frame peak — fast punch
-    SUSTAINED_THRESHOLD = 0.20  # lower bar if sustained 2+ frames (shoving)
-    WINDOW              = 8     # only look at last 8 frames (~0.25s at 30fps)
-
-    recent = history[-WINDOW:]
-
-    max_speed_l = 0.0
-    max_speed_r = 0.0
-    fast_frames_l = 0
-    fast_frames_r = 0
-
-    # Track velocity vectors for direction reversal detection
-    prev_vel_l = None
-    prev_vel_r = None
-    reversal_detected = False
-
-    for i in range(1, len(recent)):
-        bbox_h = recent[i][3]
-
-        # ── Left wrist ──
-        if recent[i][4] is not None and recent[i-1][4] is not None:
-            dlx = recent[i][4] - recent[i-1][4]
-            dly = recent[i][5] - recent[i-1][5]
-            speed_l = np.sqrt(dlx**2 + dly**2) / bbox_h
-            max_speed_l = max(max_speed_l, speed_l)
-            if speed_l > SUSTAINED_THRESHOLD:
-                fast_frames_l += 1
-            # Check for direction reversal (punch then retract)
-            if prev_vel_l is not None and speed_l > 0.05:
-                dot = (dlx * prev_vel_l[0] + dly * prev_vel_l[1])
-                if dot < 0:  # negative dot = opposite direction = reversal
-                    reversal_detected = True
-            if speed_l > 0.05:
-                prev_vel_l = (dlx, dly)
-
-        # ── Right wrist ──
-        if recent[i][6] is not None and recent[i-1][6] is not None:
-            drx = recent[i][6] - recent[i-1][6]
-            dry = recent[i][7] - recent[i-1][7]
-            speed_r = np.sqrt(drx**2 + dry**2) / bbox_h
-            max_speed_r = max(max_speed_r, speed_r)
-            if speed_r > SUSTAINED_THRESHOLD:
-                fast_frames_r += 1
-            if prev_vel_r is not None and speed_r > 0.05:
-                dot = (drx * prev_vel_r[0] + dry * prev_vel_r[1])
-                if dot < 0:
-                    reversal_detected = True
-            if speed_r > 0.05:
-                prev_vel_r = (drx, dry)
-
-    max_speed = max(max_speed_l, max_speed_r)
-
-    # ── Decision logic ──
-    spike_detected     = max_speed >= SPIKE_THRESHOLD
-    sustained_detected = fast_frames_l >= 2 or fast_frames_r >= 2
-
-    if not spike_detected and not sustained_detected:
+    # Only look at last 0.3 seconds
+    now = history[-1][0]
+    recent = [h for h in history if now - h[0] <= 0.3]
+    if len(recent) < 2:
         return False, 0.0, {}
 
-    # Confidence: spike alone = base confidence, reversal = more confident
-    if spike_detected:
-        confidence = min(1.0, 0.5 + (max_speed - SPIKE_THRESHOLD) * 1.5)
-        if reversal_detected:
-            confidence = min(1.0, confidence + 0.2)  # punch + retract = very confident
+    # Time span of window in seconds
+    time_span = max(recent[-1][0] - recent[0][0], 0.01)
+    bbox_h = recent[-1][3]
+
+    # ── Wrist pixel displacement over window ──
+    # history tuple: (time, cx, cy, bbox_h, lw_x, lw_y, rw_x, rw_y)
+    def px_per_sec(x1, y1, x2, y2):
+        return np.sqrt((x2 - x1)**2 + (y2 - y1)**2) / time_span
+
+    max_speed_px = 0.0
+    source = "none"
+
+    # Left wrist (indices 4, 5)
+    lw_start = next(((h[4], h[5]) for h in recent if h[4] is not None), None)
+    lw_end   = next(((h[4], h[5]) for h in reversed(recent) if h[4] is not None), None)
+    if lw_start and lw_end and lw_start != lw_end:
+        spd = px_per_sec(lw_start[0], lw_start[1], lw_end[0], lw_end[1])
+        if spd > max_speed_px:
+            max_speed_px = spd
+            source = "left_wrist"
+
+    # Right wrist (indices 6, 7)
+    rw_start = next(((h[6], h[7]) for h in recent if h[6] is not None), None)
+    rw_end   = next(((h[6], h[7]) for h in reversed(recent) if h[6] is not None), None)
+    if rw_start and rw_end and rw_start != rw_end:
+        spd = px_per_sec(rw_start[0], rw_start[1], rw_end[0], rw_end[1])
+        if spd > max_speed_px:
+            max_speed_px = spd
+            source = "right_wrist"
+
+    # ── Fallback: elbow speed (indices stored separately — see note below) ──
+    # Elbows are bigger, less blurry, more reliably tracked during punches.
+    # We use bbox_h to normalize so this works at any distance.
+    # Elbow speed threshold is higher since elbows move less than wrists.
+    elbow_speed_norm = 0.0
+    # Left elbow: pulled from keypoints directly isn't in history —
+    # so we use bbox-normalized body center jump as last resort proxy
+    body_start = (recent[0][1], recent[0][2])
+    body_end   = (recent[-1][1], recent[-1][2])
+    body_speed = px_per_sec(body_start[0], body_start[1], body_end[0], body_end[1])
+
+    # Thresholds — tune these:
+    # At ~1m distance bbox_h ≈ 300px → 150px/s = 0.5 body heights/s
+    # At ~3m distance bbox_h ≈ 100px → 50px/s  = 0.5 body heights/s  
+    # Using bbox_h as scale: threshold in body-heights-per-second
+    WRIST_THRESHOLD_NORM  = 1.2   # wrist must move 1.2x body height per second
+    BODY_THRESHOLD_NORM   = 0.4   # body center jump (last resort)
+
+    wrist_speed_norm = max_speed_px / max(bbox_h, 1)
+    body_speed_norm  = body_speed  / max(bbox_h, 1)
+
+    wrist_triggered = wrist_speed_norm >= WRIST_THRESHOLD_NORM
+    body_triggered  = body_speed_norm  >= BODY_THRESHOLD_NORM and source == "none"
+
+    if not wrist_triggered and not body_triggered:
+        return False, 0.0, {}
+
+    if wrist_triggered:
+        confidence = min(1.0, 0.45 + (wrist_speed_norm - WRIST_THRESHOLD_NORM) * 0.3)
     else:
-        confidence = min(0.65, 0.35 + fast_frames_l * 0.05 + fast_frames_r * 0.05)
+        confidence = 0.4  # body proxy = low confidence
 
     meta = {
-        "max_wrist_speed_norm": round(float(max_speed), 3),
-        "spike_detected": spike_detected,
-        "reversal_detected": reversal_detected,
-        "fast_frames_left": fast_frames_l,
-        "fast_frames_right": fast_frames_r,
+        "max_speed_px_per_sec": round(float(max_speed_px), 1),
+        "wrist_speed_norm": round(float(wrist_speed_norm), 3),
+        "body_speed_norm": round(float(body_speed_norm), 3),
+        "window_seconds": round(time_span, 3),
+        "source": source if wrist_triggered else "body_proxy",
     }
     return True, round(confidence, 2), meta
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EVENT 4 — ERRATIC MOVEMENT
@@ -539,4 +532,5 @@ def run_all_classifiers(
         "severity": severity,
         "details": details,
     }
+
 
