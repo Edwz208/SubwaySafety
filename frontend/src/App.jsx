@@ -6,6 +6,7 @@ import Header from './components/layout/Header.jsx'
 import Footer from './components/layout/Footer.jsx'
 import Home from './pages/Home.jsx'
 import PersistentLogin from './components/PersistentLogin.jsx'
+import DisplayAlert from './pages/DisplayAlert.jsx'
 
 function App() {
 
@@ -32,6 +33,7 @@ function App() {
           
           {/* Public Routes />*/}
           <Route path="/" element={<Home/>}/>
+          <Route path="/alerts" element={<DisplayAlert />} />
 
           {/* Private Routes />*/}
           <Route element={<PersistentLogin />}>
