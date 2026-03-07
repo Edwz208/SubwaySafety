@@ -25,38 +25,45 @@ from collections import deque
 
 CFG = {
     # Lying down / fallen
-    "LYING_ASPECT_RATIO":       1.6,   # bbox width/height ratio threshold
-    "LYING_KP_Y_TOLERANCE":     0.5,   # keypoint Y-spread as fraction of bbox height
+    "LYING_ASPECT_RATIO":        1.6,
+    "LYING_KP_Y_TOLERANCE":      0.5,
 
-    # Stationary (all thresholds are fractions of bbox height — scale invariant)
-    "STATIONARY_SECONDS":       10,
-    "STATIONARY_NORM_THRESHOLD": 0.03, # movement < 3% of bbox height = not moving
+    # Stationary
+    "STATIONARY_SECONDS":        10,
+    "STATIONARY_NORM_THRESHOLD": 0.03,
 
     # History
-    "HISTORY_WINDOW_SECONDS":   15,
+    "HISTORY_WINDOW_SECONDS":    15,
 
     # Erratic movement (normalized — scale invariant)
-    "ERRATIC_MIN_DELTA_NORM":   0.02,  # mean movement must exceed 2% of bbox height
-    "ERRATIC_CV_THRESHOLD":     0.65,  # coefficient of variation threshold
+    "ERRATIC_MIN_DELTA_NORM":    0.02,
+    "ERRATIC_CV_THRESHOLD":      0.65,
 
-    # Aggressive movement — wrist speed (normalized)
-    "AGGRESSION_WRIST_SPEED":   0.25,  # wrist must move >25% of bbox height per frame
-    "AGGRESSION_MIN_FRAMES":    2,     # must sustain for at least N frames
+    # Punch detection — requires BOTH speed AND arm extension to avoid
+    # false positives from normal walking/running
+    #
+    # TUNING GUIDE:
+    #   If normal walking triggers AGGRESSION → raise PUNCH_WRIST_SPEED_NORM
+    #   If punches are missed → lower PUNCH_ELBOW_ANGLE toward 135
+    #   If stretching triggers it → raise PUNCH_ASYMMETRY_DEG toward 50
+    "PUNCH_WRIST_SPEED_NORM":    0.8,   # wrist speed in body-heights/sec
+    "PUNCH_ELBOW_ANGLE":         145,   # degrees — arm must be this extended
+    "PUNCH_ASYMMETRY_DEG":       35,    # left/right elbow angle difference
 
     # Crouching
-    "CROUCH_RATIO_THRESHOLD":   0.35,
+    "CROUCH_RATIO_THRESHOLD":    0.35,
 
-    # Minimum bbox height to bother classifying (filters far-away noise)
-    "MIN_BBOX_HEIGHT_PX":       80,
+    # Minimum bbox height — skip far-away noisy detections
+    "MIN_BBOX_HEIGHT_PX":        80,
 
     # Keypoint confidence
-    "MIN_KP_CONFIDENCE":        0.3,
+    "MIN_KP_CONFIDENCE":         0.3,
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MOTION HISTORY STORE
-# Each entry: (timestamp, cx, cy, bbox_h, wrist_lx, wrist_ly, wrist_rx, wrist_ry)
+# Each entry: (timestamp, cx, cy, bbox_h, lw_x, lw_y, rw_x, rw_y)
 # ─────────────────────────────────────────────────────────────────────────────
 
 motion_history: dict[int, deque] = {}
@@ -70,14 +77,13 @@ def update_motion_history(
     keypoints: np.ndarray,
 ):
     """
-    Call this EVERY FRAME for every tracked person, BEFORE running classifiers.
-    Stores body center + wrist positions normalized by bbox height.
+    Call this EVERY FRAME for every tracked person, BEFORE run_all_classifiers.
+    Stores body center + wrist positions for motion analysis.
     """
     max_len = int(CFG["HISTORY_WINDOW_SECONDS"] * 15)
     if track_id not in motion_history:
         motion_history[track_id] = deque(maxlen=max_len)
 
-    # Pull wrist keypoints (indices 9=left_wrist, 10=right_wrist)
     lw_x, lw_y, lw_c = kp(keypoints, 9)
     rw_x, rw_y, rw_c = kp(keypoints, 10)
 
@@ -117,6 +123,18 @@ def visible_xs(keypoints: np.ndarray, indices: list[int]) -> list[float]:
     return [kp(keypoints, i)[0] for i in indices if kp(keypoints, i)[2] >= CFG["MIN_KP_CONFIDENCE"]]
 
 
+def _angle_between(a, b, c) -> float:
+    """
+    Angle at point B in triangle A-B-C, in degrees.
+    A=shoulder, B=elbow, C=wrist → elbow bend angle.
+    180 = fully straight arm. ~60-90 = resting/bent.
+    """
+    ba = np.array([a[0] - b[0], a[1] - b[1]], dtype=float)
+    bc = np.array([c[0] - b[0], c[1] - b[1]], dtype=float)
+    denom = np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6
+    return float(np.degrees(np.arccos(np.clip(np.dot(ba, bc) / denom, -1.0, 1.0))))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # EVENT 1 — LYING DOWN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,25 +142,19 @@ def visible_xs(keypoints: np.ndarray, indices: list[int]) -> list[float]:
 def detect_lying_down(
     keypoints: np.ndarray,
     bbox: list[float],
-    camera_angle: str = "horizontal",  # "horizontal" or "topdown"
+    camera_angle: str = "horizontal",
 ) -> tuple[bool, float, dict]:
     """
     Detects horizontal body position.
 
-    For horizontal cameras: uses bbox aspect ratio + keypoint Y-spread.
-    For top-down cameras: aspect ratio is useless (standing looks square too),
-    so we rely purely on keypoint spread and shoulder-hip distance.
-
     Signal A — bbox aspect ratio (horizontal cameras only):
-      Standing = tall bbox (height > width). Lying = wide bbox (width > height).
+      Standing = tall bbox. Lying = wide bbox (ratio > 1.6).
 
     Signal B — keypoint Y-spread:
-      Standing = large vertical spread (nose high, ankles low).
-      Lying = all keypoints at roughly same Y → small spread.
+      Standing = large vertical spread. Lying = keypoints clustered at same Y.
 
-    Signal C — shoulder-to-hip distance (top-down):
-      Top-down view: standing person has shoulders directly above hips.
-      Lying person: shoulders and hips are side by side (similar Y, spread in X).
+    Signal C — shoulder/hip lateral spread (top-down cameras only):
+      Lying top-down = shoulders and hips spread in X, similar Y.
     """
     x1, y1, x2, y2 = bbox
     box_w = x2 - x1
@@ -153,51 +165,43 @@ def detect_lying_down(
 
     aspect_ratio = box_w / max(box_h, 1)
 
-    # ── Signal A: aspect ratio (skip for top-down) ──
     signal_a = False
     if camera_angle == "horizontal":
         signal_a = aspect_ratio >= CFG["LYING_ASPECT_RATIO"]
 
-    # ── Signal B: keypoint Y spread ──
     body_ys = visible_ys(keypoints, [5, 6, 11, 12, 15, 16])
     signal_b = False
-    required_kps = 5 if not signal_a else 3  # stricter when aspect ratio didn't fire
+    required_kps = 5 if not signal_a else 3
     if len(body_ys) >= required_kps:
         y_spread = max(body_ys) - min(body_ys)
         signal_b = y_spread < (box_h * CFG["LYING_KP_Y_TOLERANCE"])
 
-    # ── Signal C: shoulder/hip lateral spread (top-down helper) ──
     signal_c = False
     if camera_angle == "topdown":
         shoulder_xs = visible_xs(keypoints, [5, 6])
-        hip_xs = visible_xs(keypoints, [11, 12])
+        hip_xs      = visible_xs(keypoints, [11, 12])
         shoulder_ys = visible_ys(keypoints, [5, 6])
-        hip_ys = visible_ys(keypoints, [11, 12])
+        hip_ys      = visible_ys(keypoints, [11, 12])
         if shoulder_xs and hip_xs and shoulder_ys and hip_ys:
-            # When lying top-down: shoulders and hips are at very different X,
-            # but similar Y. Measure X spread vs Y gap.
-            all_xs = shoulder_xs + hip_xs
-            all_ys = shoulder_ys + hip_ys
+            all_xs   = shoulder_xs + hip_xs
             x_spread = max(all_xs) - min(all_xs)
-            y_gap = abs(np.mean(shoulder_ys) - np.mean(hip_ys))
-            # Lying: wide X spread, small Y gap between shoulders and hips
+            y_gap    = abs(float(np.mean(shoulder_ys)) - float(np.mean(hip_ys)))
             signal_c = x_spread > box_w * 0.5 and y_gap < box_h * 0.3
 
-    triggered = signal_a or signal_b or signal_c
-    if not triggered:
+    if not (signal_a or signal_b or signal_c):
         return False, 0.0, {}
 
     signal_count = sum([signal_a, signal_b, signal_c])
-    if signal_count >= 2:
-        confidence = min(1.0, 0.5 + signal_count * 0.2 + (aspect_ratio / 5.0 if signal_a else 0))
-    else:
-        confidence = 0.45
+    confidence = (
+        min(1.0, 0.5 + signal_count * 0.2 + (aspect_ratio / 5.0 if signal_a else 0))
+        if signal_count >= 2 else 0.45
+    )
 
     meta = {
-        "aspect_ratio": round(aspect_ratio, 2),
-        "signal_aspect_ratio": signal_a,
+        "aspect_ratio":           round(aspect_ratio, 2),
+        "signal_aspect_ratio":    signal_a,
         "signal_keypoint_spread": signal_b,
-        "signal_topdown": signal_c,
+        "signal_topdown":         signal_c,
     }
     return True, round(confidence, 2), meta
 
@@ -216,7 +220,6 @@ def detect_fallen(
     Builds on detect_lying_down — requires it to pass first.
     """
     is_lying, lying_conf, lying_meta = detect_lying_down(keypoints, bbox, camera_angle)
-
     if not is_lying:
         return False, 0.0, {}
 
@@ -226,9 +229,7 @@ def detect_fallen(
 
     if nose_conf >= CFG["MIN_KP_CONFIDENCE"] and box_h > 0:
         relative_nose_y = (nose_y - y1) / box_h
-        head_near_ground = relative_nose_y > 0.4
-        if head_near_ground:
-            # Reduced multiplier — was 1.25, amplified borderline cases too aggressively
+        if relative_nose_y > 0.4:
             confidence = min(1.0, lying_conf * 1.1)
             meta = {**lying_meta, "relative_nose_y": round(relative_nose_y, 2), "head_near_ground": True}
             return True, round(confidence, 2), meta
@@ -238,98 +239,106 @@ def detect_fallen(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EVENT 3 — AGGRESSIVE MOVEMENT (punching, striking)
+# EVENT 3 — PUNCH / AGGRESSION
 # ─────────────────────────────────────────────────────────────────────────────
-def detect_aggression(track_id: int) -> tuple[bool, float, dict]:
-    """
-    Detects punching/striking using pixels-per-second on wrists,
-    with elbow + shoulder as fallback if wrist keypoints are lost
-    (which happens often during fast motion due to blur).
 
-    Uses a short 0.3s sliding window — only recent movement counts.
-    Threshold is raw pixels/second, easy to tune.
+def detect_aggression(
+    track_id: int,
+    keypoints: np.ndarray,
+    bbox: list[float],
+) -> tuple[bool, float, dict]:
     """
+    Punch = fast wrist speed AND extended elbow. BOTH required, no exceptions.
+    Geometry-only fallback removed — it fired on any natural arm asymmetry.
+    """
+    x1, y1, x2, y2 = bbox
+    box_h = max(y2 - y1, 1.0)
+    MIN_CONF = CFG["MIN_KP_CONFIDENCE"]
+
+    # ── Step 1: Check speed first — exit early if wrists aren't moving fast ──
+    # No point checking geometry if there's no speed
+    wrist_speed_norm = 0.0
+    speed_source     = "none"
+
     if track_id not in motion_history:
         return False, 0.0, {}
 
     history = list(motion_history[track_id])
-    if len(history) < 3:
+    if len(history) < 2:
         return False, 0.0, {}
 
-    # Only look at last 0.3 seconds
-    now = history[-1][0]
-    recent = [h for h in history if now - h[0] <= 0.3]
+    now    = history[-1][0]
+    recent = [h for h in history if now - h[0] <= 0.25]  # 0.25s window
     if len(recent) < 2:
         return False, 0.0, {}
 
-    # Time span of window in seconds
     time_span = max(recent[-1][0] - recent[0][0], 0.01)
-    bbox_h = recent[-1][3]
 
-    # ── Wrist pixel displacement over window ──
-    # history tuple: (time, cx, cy, bbox_h, lw_x, lw_y, rw_x, rw_y)
-    def px_per_sec(x1, y1, x2, y2):
-        return np.sqrt((x2 - x1)**2 + (y2 - y1)**2) / time_span
+    def disp_norm(ax, ay, bx, by):
+        return np.sqrt((bx - ax)**2 + (by - ay)**2) / time_span / box_h
 
-    max_speed_px = 0.0
-    source = "none"
-
-    # Left wrist (indices 4, 5)
-    lw_start = next(((h[4], h[5]) for h in recent if h[4] is not None), None)
+    lw_start = next(((h[4], h[5]) for h in recent          if h[4] is not None), None)
     lw_end   = next(((h[4], h[5]) for h in reversed(recent) if h[4] is not None), None)
     if lw_start and lw_end and lw_start != lw_end:
-        spd = px_per_sec(lw_start[0], lw_start[1], lw_end[0], lw_end[1])
-        if spd > max_speed_px:
-            max_speed_px = spd
-            source = "left_wrist"
+        spd = disp_norm(lw_start[0], lw_start[1], lw_end[0], lw_end[1])
+        if spd > wrist_speed_norm:
+            wrist_speed_norm = spd
+            speed_source     = "left_wrist"
 
-    # Right wrist (indices 6, 7)
-    rw_start = next(((h[6], h[7]) for h in recent if h[6] is not None), None)
+    rw_start = next(((h[6], h[7]) for h in recent          if h[6] is not None), None)
     rw_end   = next(((h[6], h[7]) for h in reversed(recent) if h[6] is not None), None)
     if rw_start and rw_end and rw_start != rw_end:
-        spd = px_per_sec(rw_start[0], rw_start[1], rw_end[0], rw_end[1])
-        if spd > max_speed_px:
-            max_speed_px = spd
-            source = "right_wrist"
+        spd = disp_norm(rw_start[0], rw_start[1], rw_end[0], rw_end[1])
+        if spd > wrist_speed_norm:
+            wrist_speed_norm = spd
+            speed_source     = "right_wrist"
 
-    # ── Fallback: elbow speed (indices stored separately — see note below) ──
-    # Elbows are bigger, less blurry, more reliably tracked during punches.
-    # We use bbox_h to normalize so this works at any distance.
-    # Elbow speed threshold is higher since elbows move less than wrists.
-    elbow_speed_norm = 0.0
-    # Left elbow: pulled from keypoints directly isn't in history —
-    # so we use bbox-normalized body center jump as last resort proxy
-    body_start = (recent[0][1], recent[0][2])
-    body_end   = (recent[-1][1], recent[-1][2])
-    body_speed = px_per_sec(body_start[0], body_start[1], body_end[0], body_end[1])
-
-    # Thresholds — tune these:
-    # At ~1m distance bbox_h ≈ 300px → 150px/s = 0.5 body heights/s
-    # At ~3m distance bbox_h ≈ 100px → 50px/s  = 0.5 body heights/s  
-    # Using bbox_h as scale: threshold in body-heights-per-second
-    WRIST_THRESHOLD_NORM  = 1.2   # wrist must move 1.2x body height per second
-    BODY_THRESHOLD_NORM   = 0.4   # body center jump (last resort)
-
-    wrist_speed_norm = max_speed_px / max(bbox_h, 1)
-    body_speed_norm  = body_speed  / max(bbox_h, 1)
-
-    wrist_triggered = wrist_speed_norm >= WRIST_THRESHOLD_NORM
-    body_triggered  = body_speed_norm  >= BODY_THRESHOLD_NORM and source == "none"
-
-    if not wrist_triggered and not body_triggered:
+    # Hard speed gate — must clear this or we don't even check geometry
+    # 1.5 = wrist travels 1.5x body height per second
+    # Normal walking wrist swing: ~0.3-0.6. Fast arm wave: ~0.8. Punch: 1.5+
+    SPEED_THRESH = 1.5
+    if wrist_speed_norm < SPEED_THRESH:
         return False, 0.0, {}
 
-    if wrist_triggered:
-        confidence = min(1.0, 0.45 + (wrist_speed_norm - WRIST_THRESHOLD_NORM) * 0.3)
-    else:
-        confidence = 0.4  # body proxy = low confidence
+    # ── Step 2: Speed cleared — now verify arm is actually extended ──────────
+    l_shoulder = kp(keypoints, 5)
+    r_shoulder = kp(keypoints, 6)
+    l_elbow    = kp(keypoints, 7)
+    r_elbow    = kp(keypoints, 8)
+    l_wrist    = kp(keypoints, 9)
+    r_wrist    = kp(keypoints, 10)
+
+    left_chain  = l_shoulder[2] >= MIN_CONF and l_elbow[2] >= MIN_CONF and l_wrist[2] >= MIN_CONF
+    right_chain = r_shoulder[2] >= MIN_CONF and r_elbow[2] >= MIN_CONF and r_wrist[2] >= MIN_CONF
+
+    left_angle  = _angle_between(
+        (l_shoulder[0], l_shoulder[1]),
+        (l_elbow[0],    l_elbow[1]),
+        (l_wrist[0],    l_wrist[1]),
+    ) if left_chain else None
+
+    right_angle = _angle_between(
+        (r_shoulder[0], r_shoulder[1]),
+        (r_elbow[0],    r_elbow[1]),
+        (r_wrist[0],    r_wrist[1]),
+    ) if right_chain else None
+
+    ANGLE_THRESH   = 140  # degrees — lowered slightly since speed gate is now strict
+    left_extended  = left_angle  is not None and left_angle  > ANGLE_THRESH
+    right_extended = right_angle is not None and right_angle > ANGLE_THRESH
+
+    if not (left_extended or right_extended):
+        # Fast wrist but no arm extension = vigorous waving, not punching
+        return False, 0.0, {}
+
+    # ── Both gates cleared: fast wrist + extended elbow = punch ─────────────
+    confidence = min(1.0, 0.55 + (wrist_speed_norm - SPEED_THRESH) * 0.15)
 
     meta = {
-        "max_speed_px_per_sec": round(float(max_speed_px), 1),
-        "wrist_speed_norm": round(float(wrist_speed_norm), 3),
-        "body_speed_norm": round(float(body_speed_norm), 3),
-        "window_seconds": round(time_span, 3),
-        "source": source if wrist_triggered else "body_proxy",
+        "left_elbow_angle":  round(left_angle,  1) if left_angle  is not None else None,
+        "right_elbow_angle": round(right_angle, 1) if right_angle is not None else None,
+        "wrist_speed_norm":  round(wrist_speed_norm, 3),
+        "speed_source":      speed_source,
     }
     return True, round(confidence, 2), meta
 
@@ -339,15 +348,9 @@ def detect_aggression(track_id: int) -> tuple[bool, float, dict]:
 
 def detect_erratic_movement(track_id: int) -> tuple[bool, float, dict]:
     """
-    Detects chaotic body movement using Coefficient of Variation (CV).
-
-    CV = std / mean of frame-to-frame body center displacements.
-    High CV = inconsistent movement = erratic behaviour.
-
-    All distances are normalized by bbox height — scale invariant.
-    Previously this used raw pixels, which broke at distance.
-
-    Also previously: avg_bbox_h was referenced but never defined — crash bug.
+    Detects chaotic body movement via Coefficient of Variation (CV).
+    CV = std / mean of normalized frame-to-frame displacements.
+    High CV + sufficient mean movement = erratic behaviour.
     """
     if track_id not in motion_history:
         return False, 0.0, {}
@@ -360,7 +363,6 @@ def detect_erratic_movement(track_id: int) -> tuple[bool, float, dict]:
     for i in range(1, len(history)):
         dx = history[i][1] - history[i-1][1]
         dy = history[i][2] - history[i-1][2]
-        # BUG FIX: normalize by bbox_h (index 3) — was using undefined avg_bbox_h
         avg_bbox_h = (history[i][3] + history[i-1][3]) / 2.0
         if avg_bbox_h > 0:
             deltas.append(np.sqrt(dx**2 + dy**2) / avg_bbox_h)
@@ -369,22 +371,19 @@ def detect_erratic_movement(track_id: int) -> tuple[bool, float, dict]:
         return False, 0.0, {}
 
     mean_delta = float(np.mean(deltas))
-    std_delta = float(np.std(deltas))
+    std_delta  = float(np.std(deltas))
 
-    # BUG FIX: threshold is now normalized (0.02 = 2% of bbox height per frame)
     if mean_delta < CFG["ERRATIC_MIN_DELTA_NORM"]:
         return False, 0.0, {}
 
     cv = std_delta / (mean_delta + 1e-6)
-    is_erratic = cv >= CFG["ERRATIC_CV_THRESHOLD"]
-
-    if not is_erratic:
+    if cv < CFG["ERRATIC_CV_THRESHOLD"]:
         return False, 0.0, {}
 
     confidence = min(1.0, (cv - CFG["ERRATIC_CV_THRESHOLD"]) * 2 + 0.4)
     meta = {
-        "mean_delta_norm": round(mean_delta, 4),
-        "std_delta_norm": round(std_delta, 4),
+        "mean_delta_norm":          round(mean_delta, 4),
+        "std_delta_norm":           round(std_delta,  4),
         "coefficient_of_variation": round(cv, 2),
     }
     return True, round(confidence, 2), meta
@@ -399,13 +398,10 @@ def detect_crouching(
     bbox: list[float],
 ) -> tuple[bool, float, dict]:
     """
-    Detects crouching by measuring vertical gap between nose and hips
-    relative to bbox height.
-
-    Standing: large gap (head far above hips).
-    Crouching: small gap (head drops toward hip level).
-
-    Guards against lying-down false positives via aspect ratio check.
+    Detects crouching: nose drops toward hip level relative to bbox height.
+    Standing: large vertical gap between nose and hips.
+    Crouching: gap shrinks as head drops toward hip level.
+    Guards against lying false positives via aspect ratio check.
     """
     x1, y1, x2, y2 = bbox
     box_w = x2 - x1
@@ -414,7 +410,6 @@ def detect_crouching(
     if box_h < 1:
         return False, 0.0, {}
 
-    # Lying down guard
     if box_w / box_h > 1.2:
         return False, 0.0, {}
 
@@ -428,7 +423,7 @@ def detect_crouching(
     if nose_c < CFG["MIN_KP_CONFIDENCE"] or not hip_ys:
         return False, 0.0, {}
 
-    avg_hip_y = float(np.mean(hip_ys))
+    avg_hip_y          = float(np.mean(hip_ys))
     vertical_gap_ratio = (avg_hip_y - nose_y) / box_h
 
     if vertical_gap_ratio >= CFG["CROUCH_RATIO_THRESHOLD"]:
@@ -437,8 +432,8 @@ def detect_crouching(
     confidence = max(0.4, min(1.0, 1.0 - (vertical_gap_ratio / CFG["CROUCH_RATIO_THRESHOLD"])))
     meta = {
         "vertical_gap_ratio": round(float(vertical_gap_ratio), 3),
-        "avg_hip_y": round(avg_hip_y, 1),
-        "nose_y": round(float(nose_y), 1),
+        "avg_hip_y":          round(avg_hip_y, 1),
+        "nose_y":             round(float(nose_y), 1),
     }
     return True, round(confidence, 2), meta
 
@@ -474,26 +469,22 @@ def run_all_classifiers(
     frame_w: int,
     frame_h: int,
     custom_zones: list[dict] | None = None,
-    camera_angle: str = "horizontal",  # "horizontal" or "topdown"
+    camera_angle: str = "horizontal",
 ) -> dict:
     """
     Runs every classifier for a single detected person.
+    Call update_motion_history() BEFORE this every frame.
 
-    IMPORTANT: Call update_motion_history() BEFORE calling this function
-    every frame — otherwise erratic/aggression detection has no data.
-
-    Args:
-        camera_angle: "horizontal" for wall/eye-level mount,
-                      "topdown" for ceiling ~90° mount.
+    camera_angle: "horizontal" = wall/eye-level mount
+                  "topdown"    = ceiling ~90° mount
     """
     x1, y1, x2, y2 = bbox
     box_h = y2 - y1
 
-    # Skip people who are too small — unreliable keypoints at distance
     if box_h < CFG["MIN_BBOX_HEIGHT_PX"]:
         return {"events": [], "severity": "none", "details": {}, "skipped": "too_small"}
 
-    events = []
+    events  = []
     details = {}
 
     # ── Fallen / Lying down ──────────────────────────────────
@@ -507,8 +498,8 @@ def run_all_classifiers(
             events.append("LYING_DOWN")
             details["LYING_DOWN"] = {"confidence": conf, **meta}
 
-    # ── Aggression (punching/striking — wrist speed) ─────────
-    aggression, conf, meta = detect_aggression(track_id)
+    # ── Aggression: speed + joint geometry ───────────────────
+    aggression, conf, meta = detect_aggression(track_id, keypoints, bbox)
     if aggression:
         events.append("AGGRESSION")
         details["AGGRESSION"] = {"confidence": conf, **meta}
@@ -528,9 +519,10 @@ def run_all_classifiers(
     severity = classify_severity(events)
 
     return {
-        "events": events,
+        "events":   events,
         "severity": severity,
-        "details": details,
+        "details":  details,
     }
+
 
 
