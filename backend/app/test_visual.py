@@ -2,18 +2,27 @@
 # Run this from backend/ folder:  python test_visual.py
 # Press Q to quit, SPACE to pause
 
+# test_visual.py
+# Run this from backend/ folder:  python test_visual.py
+# Press Q to quit, SPACE to pause, S = screenshot
+
 import cv2
 import sys
 import os
 
-# Add app/ to Python path so imports work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "app"))
-
 from detection.model import get_model
 from detection import tracker, classifiers, annotator
 
-# ── Change this to your test video path ──
-VIDEO_SOURCE = 0  # 0 = webcam, or "path/to/video.mp4"
+# ── Config ────────────────────────────────────────────────────────────────────
+VIDEO_SOURCE = 0          # 0 = webcam, or "path/to/video.mp4"
+
+# Set this to match your camera mount:
+#   "horizontal" = wall / eye-level / angled mount
+#   "topdown"    = ceiling mount (~90 degrees)
+CAMERA_ANGLE = "horizontal"
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 model  = get_model()
 cap    = cv2.VideoCapture(VIDEO_SOURCE)
@@ -30,7 +39,6 @@ while cap.isOpened():
 
     frame_h, frame_w = frame.shape[:2]
 
-    # ── Run full pipeline ──
     results = model.track(frame, persist=True, verbose=False, conf=0.35)
 
     detections = []
@@ -41,14 +49,19 @@ while cap.isOpened():
             track_id = int(box.id[0]) if box.id is not None else 0
             bbox     = box.xyxy[0].tolist()
             kps_np   = kps.cpu().numpy()
-            cx       = (bbox[0] + bbox[2]) / 2
-            cy       = (bbox[1] + bbox[3]) / 2
 
-            tracker.update(track_id, cx, cy)
+            cx    = (bbox[0] + bbox[2]) / 2
+            cy    = (bbox[1] + bbox[3]) / 2
+            box_h = bbox[3] - bbox[1]
+
+            # ── BUG FIX: this was missing entirely — erratic/aggression had no data ──
+            classifiers.update_motion_history(track_id, cx, cy, box_h, kps_np)
+
             active_ids.append(track_id)
 
             result = classifiers.run_all_classifiers(
-                kps_np, bbox, track_id, frame_w, frame_h
+                kps_np, bbox, track_id, frame_w, frame_h,
+                camera_angle=CAMERA_ANGLE,
             )
 
             detections.append({
@@ -58,22 +71,22 @@ while cap.isOpened():
                 **result,
             })
 
+    classifiers.clear_stale_tracks(active_ids)
     tracker.clear_stale(active_ids)
 
-    # ── Annotate ──
     annotated = annotator.annotate_frame(frame, detections)
 
-    # ── Print detections to terminal in real time ──
     for d in detections:
+        if d.get("skipped"):
+            continue
         x1, y1, x2, y2 = d["bbox"]
         box_w = x2 - x1
         box_h = max(y2 - y1, 1)
         aspect = round(box_w / box_h, 2)
-        print(f"  ID:{d['track_id']} | aspect={aspect} | events={d['events']} | details={d['details']}")
+        if d["events"]:  # only print when something is detected
+            print(f"  ID:{d['track_id']} | aspect={aspect} | events={d['events']} | sev={d['severity']} | details={d['details']}")
 
-    # ── Show frame ──
     cv2.imshow("Transit Guardian - Detection Test", annotated)
-
     key = cv2.waitKey(1) & 0xFF
     if key == ord("q"):
         break
