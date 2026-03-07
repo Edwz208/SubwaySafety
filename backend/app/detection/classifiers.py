@@ -243,67 +243,101 @@ def detect_fallen(
 
 def detect_aggression(track_id: int) -> tuple[bool, float, dict]:
     """
-    Detects fast wrist movement consistent with punching or striking.
-
-    Body center barely moves during a punch — that's why erratic movement
-    detection misses it entirely. Wrists however move extremely fast.
-
-    We track wrist positions per frame and compute frame-to-frame wrist speed
-    normalized by bbox height (scale invariant).
-
-    A punch threshold: wrist moves >25% of body height in a single frame.
-    We require this to happen for at least 2 consecutive frames to avoid
-    random keypoint jitter triggering false positives.
-
-    Returns AGGRESSION event if either wrist crosses the speed threshold.
+    Detects punching/striking via wrist speed spikes.
+    
+    A punch = one explosive wrist movement (1-2 frames fast, then stops or retracts).
+    The old consecutive-frames approach reset the counter on deceleration,
+    so real punches never triggered.
+    
+    New approach:
+    - Track the PEAK wrist speed across recent frames (sliding window)
+    - A single frame exceeding SPIKE threshold = strike detected
+    - Direction reversal bonus: if wrist reverses direction after spike = more confident
+    - Separate lower threshold for sustained shoving/pushing
     """
     if track_id not in motion_history:
         return False, 0.0, {}
 
     history = list(motion_history[track_id])
-    if len(history) < CFG["AGGRESSION_MIN_FRAMES"] + 1:
+    # Need enough frames for a meaningful window
+    if len(history) < 3:
         return False, 0.0, {}
 
-    threshold = CFG["AGGRESSION_WRIST_SPEED"]
+    SPIKE_THRESHOLD     = 0.35  # single-frame peak — fast punch
+    SUSTAINED_THRESHOLD = 0.20  # lower bar if sustained 2+ frames (shoving)
+    WINDOW              = 8     # only look at last 8 frames (~0.25s at 30fps)
+
+    recent = history[-WINDOW:]
+
+    max_speed_l = 0.0
+    max_speed_r = 0.0
     fast_frames_l = 0
     fast_frames_r = 0
-    max_wrist_speed = 0.0
 
-    for i in range(1, len(history)):
-        bbox_h = history[i][3]
+    # Track velocity vectors for direction reversal detection
+    prev_vel_l = None
+    prev_vel_r = None
+    reversal_detected = False
 
-        # Left wrist speed
-        if history[i][4] is not None and history[i-1][4] is not None:
-            dlx = history[i][4] - history[i-1][4]
-            dly = history[i][5] - history[i-1][5]
+    for i in range(1, len(recent)):
+        bbox_h = recent[i][3]
+
+        # ── Left wrist ──
+        if recent[i][4] is not None and recent[i-1][4] is not None:
+            dlx = recent[i][4] - recent[i-1][4]
+            dly = recent[i][5] - recent[i-1][5]
             speed_l = np.sqrt(dlx**2 + dly**2) / bbox_h
-            max_wrist_speed = max(max_wrist_speed, speed_l)
-            if speed_l > threshold:
+            max_speed_l = max(max_speed_l, speed_l)
+            if speed_l > SUSTAINED_THRESHOLD:
                 fast_frames_l += 1
-            else:
-                fast_frames_l = 0  # must be consecutive
+            # Check for direction reversal (punch then retract)
+            if prev_vel_l is not None and speed_l > 0.05:
+                dot = (dlx * prev_vel_l[0] + dly * prev_vel_l[1])
+                if dot < 0:  # negative dot = opposite direction = reversal
+                    reversal_detected = True
+            if speed_l > 0.05:
+                prev_vel_l = (dlx, dly)
 
-        # Right wrist speed
-        if history[i][6] is not None and history[i-1][6] is not None:
-            drx = history[i][6] - history[i-1][6]
-            dry = history[i][7] - history[i-1][7]
+        # ── Right wrist ──
+        if recent[i][6] is not None and recent[i-1][6] is not None:
+            drx = recent[i][6] - recent[i-1][6]
+            dry = recent[i][7] - recent[i-1][7]
             speed_r = np.sqrt(drx**2 + dry**2) / bbox_h
-            max_wrist_speed = max(max_wrist_speed, speed_r)
-            if speed_r > threshold:
+            max_speed_r = max(max_speed_r, speed_r)
+            if speed_r > SUSTAINED_THRESHOLD:
                 fast_frames_r += 1
-            else:
-                fast_frames_r = 0
+            if prev_vel_r is not None and speed_r > 0.05:
+                dot = (drx * prev_vel_r[0] + dry * prev_vel_r[1])
+                if dot < 0:
+                    reversal_detected = True
+            if speed_r > 0.05:
+                prev_vel_r = (drx, dry)
 
-        if fast_frames_l >= CFG["AGGRESSION_MIN_FRAMES"] or fast_frames_r >= CFG["AGGRESSION_MIN_FRAMES"]:
-            confidence = min(1.0, 0.4 + (max_wrist_speed / threshold) * 0.3)
-            meta = {
-                "max_wrist_speed_norm": round(float(max_wrist_speed), 3),
-                "fast_frames_left": fast_frames_l,
-                "fast_frames_right": fast_frames_r,
-            }
-            return True, round(confidence, 2), meta
+    max_speed = max(max_speed_l, max_speed_r)
 
-    return False, 0.0, {}
+    # ── Decision logic ──
+    spike_detected     = max_speed >= SPIKE_THRESHOLD
+    sustained_detected = fast_frames_l >= 2 or fast_frames_r >= 2
+
+    if not spike_detected and not sustained_detected:
+        return False, 0.0, {}
+
+    # Confidence: spike alone = base confidence, reversal = more confident
+    if spike_detected:
+        confidence = min(1.0, 0.5 + (max_speed - SPIKE_THRESHOLD) * 1.5)
+        if reversal_detected:
+            confidence = min(1.0, confidence + 0.2)  # punch + retract = very confident
+    else:
+        confidence = min(0.65, 0.35 + fast_frames_l * 0.05 + fast_frames_r * 0.05)
+
+    meta = {
+        "max_wrist_speed_norm": round(float(max_speed), 3),
+        "spike_detected": spike_detected,
+        "reversal_detected": reversal_detected,
+        "fast_frames_left": fast_frames_l,
+        "fast_frames_right": fast_frames_r,
+    }
+    return True, round(confidence, 2), meta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -505,3 +539,4 @@ def run_all_classifiers(
         "severity": severity,
         "details": details,
     }
+
