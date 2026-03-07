@@ -1,25 +1,44 @@
 File structure (for YOLOv8):
 transit-guardian/
 │
-├── backend/                        # FastAPI (Python)
-│   ├── main.py                     # App entry point, CORS, mounts routers
-│   ├── requirements.txt
-│   │
-│   ├── routers/
-│   │   ├── analyze.py              # POST /analyze — accepts frame, returns detections
-│   │   └── alerts.py               # POST /alert — saves confirmed alert to DB
-│   │
-│   ├── detection/
-│   │   ├── model.py                # Loads YOLOv8-Pose model (singleton, loads once)
-│   │   ├── classifiers.py          # ← YOUR CUSTOM EVENT LOGIC LIVES HERE
-│   │   ├── tracker.py              # Motion history per person (deque per track_id)
-│   │   └── annotator.py            # Draws boxes/labels onto frame for dashboard
-│   │
-│   ├── schemas/
-│   │   └── detection.py            # Pydantic models: FrameRequest, DetectionResponse, etc.
-│   │
-│   └── db/
-│       └── incidents.py            # SQLite / simple JSON file — stores alert history
+├── backend/                        
+|   |__ __pycache__/
+|   |   |__ main.cpython-313.pyc
+|   |__ app/
+|   |   |__ __pycache__/
+|   |   |   |__ main.cpython-313.pyc
+|   |__ core/
+|   |   |__ __pycache__/
+|   |   |__ |__ __init__.cpython-313.pyc
+|   |   |__ |__ config.cpython-313.pyc
+|   |   |__ __init__.py
+|   |   |__ config.py
+|   |   |__ security.py
+|   |   |__ db/
+|   |   |   |__ __init__.py
+|   |   |   |__ connection.py
+|   |   |   |__ helpers.py
+|   │   │
+|   │   ├── detection/
+|   │   │   ├── model.py                
+|   │   │   ├── classifiers.py          
+|   │   │   ├── tracker.py              
+|   │   │   └── annotator.py    
+|   |   |   |__ stream.py
+|   |   |   |__ models/
+|   |   |   |   |__ __init__.py
+|   │   ├── routers/
+|   │   │   ├── __pycache__/   
+|   |   |   |__ login.py
+|   |   |   |__ stream.py
+|   |   |   |__ video_stream.py
+|   │   │
+
+|   │   │
+|   │   ├── schemas/
+|   │   │   └── _init_.py            
+|   │   │    |__ user.py
+
 │
 ├── node-server/                    # Node.js Socket.io layer
 │   ├── index.js                    # Express + Socket.io server
