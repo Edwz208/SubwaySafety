@@ -31,8 +31,8 @@ class ConnectionManager:
     
 manager = ConnectionManager()
 
-@router.websocket("/stream/{stream_id}")
-async def stream_connection(stream_id: int, websocket: WebSocket):
+@router.websocket("/alert")
+async def stream_connection(websocket: WebSocket):
     try: 
         await manager.connect(websocket)
     except Exception: 
@@ -42,3 +42,9 @@ async def stream_connection(stream_id: int, websocket: WebSocket):
             data = await websocket.receive_text() # needed to handle disconnects            
     except WebSocketDisconnect:
         await manager.disconnect(websocket)
+
+def send_alert(alert_data: dict[str, Any]):
+    message = json.dumps(alert_data)
+    print(f"Broadcasting alert: {message}")
+    import asyncio
+    asyncio.create_task(manager.broadcast(message))
