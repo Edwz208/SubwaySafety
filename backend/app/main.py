@@ -12,7 +12,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.FRONTEND_ORIGIN,
-    allow_credentials=True, # allows for cookiese
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["Authorization"],
 ) 
@@ -20,5 +20,5 @@ app.add_middleware(
 app.include_router(login_router)
 app.include_router(test_router)
 app.include_router(alert_router)
-app.include_router(cameras_router, prefix="/api")
-app.include_router(events_router, prefix="/api")
+app.include_router(cameras_router)
+app.include_router(events_router)

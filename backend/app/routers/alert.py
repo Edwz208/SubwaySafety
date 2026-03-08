@@ -48,3 +48,19 @@ def send_alert(alert_data: dict[str, Any]):
     print(f"Broadcasting alert: {message}")
     import asyncio
     asyncio.create_task(manager.broadcast(message))
+
+@router.get("/test_alert")
+async def test_alert():
+    sample_alert = {
+        "type": "event",
+        "event": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "name": "King St Entrance",
+            "camera_id": "3",
+            "event_type": "aggression",
+            "description": "agression detected at King St Entrance",
+            "created_at": "2024-06-01T12:34:56Z"
+        }
+    }
+    send_alert(sample_alert)
+    return {"message": "Test alert sent"}
