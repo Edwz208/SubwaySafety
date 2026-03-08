@@ -1,8 +1,6 @@
-# alert.py
-# Handles WebSocket connections AND fires Gemini alerts when camera_worker detects events.
+# routers/alert.py
 
-from fastapi import WebSocket, WebSocketDisconnect, APIRouter, HTTPException, status, Depends
-from schemas.event import EventCreate
+from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from typing import Any
 import json
 import asyncio
@@ -10,40 +8,50 @@ import time
 import os
 import threading
 
+from db.connection import SessionLocal
+from models.event import Event
+
+# adjust these imports to match your actual project structure
+from services.gemini import analyze_video
+from pathlib import Path
+CLIPS_DIR = Path("clips")
+
 router = APIRouter()
 
-# ── Gemini cooldown — only call Gemini once per minute ───────────────────────
 _last_gemini_time: float = 0.0
 GEMINI_COOLDOWN_SECONDS: int = 60
+_main_loop: asyncio.AbstractEventLoop | None = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONNECTION MANAGER
-# ─────────────────────────────────────────────────────────────────────────────
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _main_loop
+    _main_loop = loop
+
 
 class ConnectionManager:
     def __init__(self) -> None:
         self.active_connections: list[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
         print(f"New connection. Total connections: {len(self.active_connections)}")
 
-    async def disconnect(self, websocket: WebSocket):
+    async def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            print(f"Disconnected. Total connections: {len(self.active_connections)}")
 
-    async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
+    async def broadcast(self, message: str) -> None:
+        disconnected: list[WebSocket] = []
 
-    async def broadcast(self, message: str):
-        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
             except Exception as e:
+                print(f"[broadcast] Failed to send to one websocket: {e}")
                 disconnected.append(connection)
+
         for conn in disconnected:
             if conn in self.active_connections:
                 self.active_connections.remove(conn)
@@ -52,131 +60,149 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# send_alert — thin wrapper around dispatch_alert for backwards compatibility
-# ─────────────────────────────────────────────────────────────────────────────
-
-def send_alert(alert_data: dict[str, Any]):
-    dispatch_alert(
-        events    = [alert_data.get("event", {}).get("event_type", "UNKNOWN")],
-        clip_file = None,
-        camera_id = str(alert_data.get("event", {}).get("camera_id", "unknown")),
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# dispatch_alert — called by camera_worker when a critical event fires
-# ─────────────────────────────────────────────────────────────────────────────
-
-def dispatch_alert(
-    events:    list[str],
-    clip_file: str | None,
-    camera_id: str,
-):
-    print(f"[alert] Dispatching alert: {events} | camera={camera_id}")
-
-    from services.gemini import analyze_incident, analyze_video_direct
-    from detection.clip_recorder import CLIPS_DIR
-
-    # ── Step 1a: Gemini text summary (cooldown protected) ────────────────────
-    global _last_gemini_time
-    now = time.time()
-
-    if now - _last_gemini_time < GEMINI_COOLDOWN_SECONDS:
-        gemini_message = f"CRITICAL alert: {', '.join(events)} detected at {camera_id}."
-        print(f"[alert] Gemini skipped (cooldown) — using fallback message")
-    else:
-        _last_gemini_time = now
-        try:
-            gemini_message = analyze_incident(
-                event_type = events[0] if events else "UNKNOWN",
-                severity   = "critical",
-                location   = camera_id,
-                camera_id  = camera_id,
-                details    = {
-                    "all_events": ", ".join(events),
-                },
-            )
-            print(f"[alert] Gemini text: {gemini_message}")
-        except Exception as e:
-            gemini_message = f"CRITICAL alert: {', '.join(events)} detected at {camera_id}."
-            print(f"[alert] Gemini failed, using fallback: {e}")
-
-    # ── Step 1b: Video analysis in background after clip finishes ─────────────
-    def analyze_clip_later():
-        time.sleep(8)
-        try:
-            clip_path = os.path.join(CLIPS_DIR, clip_file)
-            if os.path.exists(clip_path):
-                print(f"[alert] Sending clip to Gemini for video analysis...")
-                video_analysis = analyze_video_direct(clip_path)
-                print(f"[alert] Gemini video analysis:\n{video_analysis}")
-            else:
-                print(f"[alert] Clip not found: {clip_path}")
-        except Exception as e:
-            print(f"[alert] Video analysis failed: {e}")
-
-    if clip_file:
-        threading.Thread(target=analyze_clip_later, daemon=True).start()
-
-    # ── Step 2: Build payload — schema is the single source of truth ──────────
-    event = EventCreate(
-        camera_id       = camera_id,
-        event_type      = events[0] if events else "UNKNOWN",
-        message         = gemini_message,
-        video_clip_path = clip_file,
-    )
-
-    payload = json.dumps({
-        "type":      "alert",
-        "event":     event.model_dump(),
-        "timestamp": time.time(),
-    })
-
-    # ── Step 3: Broadcast to all connected dashboards ─────────────────────────
+def broadcast_json(payload: dict[str, Any]) -> None:
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.run_coroutine_threadsafe(manager.broadcast(payload), loop)
+        if _main_loop and _main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast(json.dumps(payload)),
+                _main_loop,
+            )
         else:
-            loop.run_until_complete(manager.broadcast(payload))
+            print("[alert] No running main loop available for broadcast")
     except Exception as e:
         print(f"[alert] WebSocket broadcast failed: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WEBSOCKET ENDPOINT
-# ─────────────────────────────────────────────────────────────────────────────
+def send_alert(alert_data: dict[str, Any]) -> None:
+    event_data = alert_data.get("event", {})
+    dispatch_alert(
+        events=[event_data.get("event_type", "UNKNOWN")],
+        clip_file=event_data.get("video_clip_path"),
+        camera_id=int(event_data.get("camera_id", 0)),
+    )
+
+
+def dispatch_alert(events: list[str], clip_file: str | None, camera_id: int) -> None:
+    global _last_gemini_time
+
+    db = SessionLocal()
+    saved_event: Event | None = None
+
+    try:
+        saved_event = Event(
+            camera_id=camera_id,
+            event_type=events[0] if events else "UNKNOWN",
+            video_clip_path=clip_file,
+        )
+        db.add(saved_event)
+        db.commit()
+        db.refresh(saved_event)
+
+        payload = {
+            "type": "event",
+            "event": {
+                "id": saved_event.id,
+                "camera_id": saved_event.camera_id,
+                "event_type": saved_event.event_type,
+                "video_clip_path": saved_event.video_clip_path,
+                "occurred_at": (
+                    saved_event.occurred_at.isoformat()
+                    if saved_event.occurred_at
+                    else None
+                ),
+            },
+            "timestamp": time.time(),
+        }
+
+        broadcast_json(payload)
+        print(f"[dispatch_alert] Event saved and broadcast: {payload}")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[dispatch_alert] Failed to save event: {e}")
+        return
+    finally:
+        db.close()
+
+    def analyze_clip_later(event_id: int, clip_filename: str) -> None:
+        global _last_gemini_time
+
+        try:
+            time.sleep(8)
+
+            if not clip_filename:
+                return
+
+            now = time.time()
+            if now - _last_gemini_time < GEMINI_COOLDOWN_SECONDS:
+                print("[alert] Gemini cooldown active, skipping video analysis")
+                return
+
+            clip_path = CLIPS_DIR / clip_file
+
+
+            if not os.path.exists(clip_path):
+                print(f"[alert] Clip not found: {clip_path}")
+                return
+
+            print(f"[alert] Sending clip to Gemini for analysis: {clip_path}")
+            gemini_message = analyze_video(clip_path)
+            _last_gemini_time = time.time()
+
+            print(f"[alert] Gemini video analysis:\n{gemini_message}")
+
+            db2 = SessionLocal()
+            try:
+                event_row = db2.query(Event).filter(Event.id == event_id).first()
+                if event_row:
+                    event_row.description = gemini_message
+                    db2.commit()
+            finally:
+                db2.close()
+
+            analysis_payload = {
+                "type": "event_analysis",
+                "event_id": event_id,
+                "camera_id": camera_id,
+                "description": gemini_message,
+                "timestamp": time.time(),
+            }
+            broadcast_json(analysis_payload)
+
+        except Exception as e:
+            print(f"[alert] Video analysis failed: {e}")
+
+    if clip_file and saved_event is not None:
+        threading.Thread(
+            target=analyze_clip_later,
+            args=(saved_event.id, clip_file),
+            daemon=True,
+        ).start()
+
 
 @router.websocket("/alert")
 async def stream_connection(websocket: WebSocket):
     try:
         await manager.connect(websocket)
-    except Exception:
+    except Exception as e:
+        print(f"[websocket] connect failed: {e}")
         return
+
     try:
         while True:
-            data = await websocket.receive_text()
+            await websocket.receive_text()
     except WebSocketDisconnect:
+        await manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[websocket] error: {e}")
         await manager.disconnect(websocket)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST ENDPOINT
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.get("/test_alert")
 async def test_alert():
-    sample_alert = {
-        "type": "event",
-        "event": {
-            "id":          "123e4567-e89b-12d3-a456-426614174000",
-            "name":        "King St Entrance",
-            "camera_id":   "3",
-            "event_type":  "aggression",
-            "description": "aggression detected at King St Entrance",
-            "created_at":  "2024-06-01T12:34:56Z",
-        }
-    }
-    send_alert(sample_alert)
+    dispatch_alert(
+        events=["aggression"],
+        clip_file=None,
+        camera_id=3,
+    )
     return {"message": "Test alert sent"}

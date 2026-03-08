@@ -1,6 +1,4 @@
-from uuid import UUID
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from db.connection import get_db
@@ -9,63 +7,39 @@ from schemas.camera import CameraCreate, CameraRead, CameraUpdate
 
 router = APIRouter()
 
+
 @router.post("/cameras", response_model=CameraRead, status_code=status.HTTP_201_CREATED)
-def create_camera(payload: CameraCreate, db: Session = Depends(get_db)):
+async def create_camera(
+    payload: CameraCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     camera = Camera(**payload.model_dump())
     db.add(camera)
     db.commit()
     db.refresh(camera)
-    return {
-        "id": camera.id,
-        "name": camera.name,
-        "url": camera.url,
-        "location": camera.location,
-        "is_detected": False,
-    }
 
+    if camera.url:
+        await request.app.state.worker_manager.start_worker(
+            camera_id=camera.id,
+            camera_url=camera.url,
+            camera_name=camera.name,
+        )
 
-@router.get("/cameras", response_model=list[CameraRead])
-def list_cameras(db: Session = Depends(get_db)):
-    print("hi")
-    cameras = [
-        {
-            "id": 1,
-            "name": "Union Station Platform",
-            "location": "Toronto Union Station",
-            "is_detected": False,
-            "is_online": True
-        },
-        {
-            "id": 2,
-            "name": "King St Entrance",
-            "location": "King Station Entrance",
-            "is_detected": False,
-            "is_online": True
-        },
-        {
-            "id": 3,
-            "name": "Subway Tunnel East",
-            "location": "Line 1 East Tunnel",
-            "is_detected": False,
-            "is_online": False
-        }
-    ]
-
-    return cameras
-
-
-@router.get("/cameras/{camera_id}", response_model=CameraRead)
-def get_camera(camera_id: UUID, db: Session = Depends(get_db)):
-    camera = db.query(Camera).filter(Camera.id == camera_id).first()
-    if not camera:
-        raise HTTPException(status_code=404, detail="Camera not found")
     return camera
 
 
+@router.get("/cameras", response_model=list[CameraRead])
+async def list_cameras(db: Session = Depends(get_db)):
+    cameras = db.query(Camera).order_by(Camera.id).all()
+    return cameras
+
+
 @router.patch("/cameras/{camera_id}", response_model=CameraRead)
-def update_camera(
-    camera_id: UUID,
+async def update_camera(
+    camera_id: int,
     payload: CameraUpdate,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
@@ -79,14 +53,30 @@ def update_camera(
 
     db.commit()
     db.refresh(camera)
+
+    if camera.url:
+        await request.app.state.worker_manager.restart_worker(
+            camera_id=camera.id,
+            camera_url=camera.url,
+            camera_name=camera.name,
+        )
+    else:
+        await request.app.state.worker_manager.stop_worker(camera.id)
+
     return camera
 
 
 @router.delete("/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_camera(camera_id: UUID, db: Session = Depends(get_db)):
+async def delete_camera(
+    camera_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
+
+    await request.app.state.worker_manager.stop_worker(camera_id)
 
     db.delete(camera)
     db.commit()

@@ -7,6 +7,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "app"))
 from detection.camera_worker import run_camera
 
 run_camera(
-    source    = "http://172.20.10.7:8080/video",  # change to your phone's IP
+    source = "rtsp://155.138.128.95:8554/live/phone", # change to ip
     camera_id = "phone",
 )
