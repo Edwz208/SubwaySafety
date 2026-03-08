@@ -8,11 +8,12 @@ import time
 import threading
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 PRE_ALERT_SECONDS  = 8
 POST_ALERT_SECONDS = 5
 BUFFER_FPS         = 15
-CLIPS_DIR          = r"C:\Users\indom\OneDrive\Desktop\SubwaySafety\backend\clips"
+CLIPS_DIR          = Path("clips")
 
 
 class ClipRecorder:
