@@ -10,7 +10,7 @@ const Header = () => {
             🚇
           </div>
           <div>
-            <h1 className="text-white font-bold text-base tracking-tight">SubGuard</h1>
+            <h1 className="text-white font-bold text-base tracking-tight">WatchLine</h1>
             <p className="text-slate-500 text-xs">Transit Safety Dashboard</p>
           </div>
         </div>
