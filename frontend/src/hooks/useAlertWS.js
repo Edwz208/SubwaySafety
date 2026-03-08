@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from '@tanstack/react-query';
 
 export default function useWebSocket(
   { reconnectDelayMs = 1000, maxReconnectDelayMs = 15000, shouldReconnect = true, onMessage } = {}
 ) {
+  const queryClient = useQueryClient();
   const wsRef = useRef(null);
   const timerRef = useRef(null);
   const mountedRef = useRef(false);
@@ -46,7 +48,27 @@ export default function useWebSocket(
         firstMessageRef.current = false
       }
       console.log(data)
-      onMessageRef.current?.(data)
+    const cameraId = data?.event?.camera_id;
+    if (data?.type === "event" && cameraId) {
+      queryClient.setQueryData(['cameras'], (prev) =>
+        prev?.map((camera) =>
+        String(camera.id) === String(data.event.camera_id)
+            ? { ...camera, is_detected: true }
+            : camera
+        )
+      );
+    }
+      else if (data?.type === "camera"){
+      queryClient.setQueryData(['cameras'], (prev) => {
+        if (!prev) return prev;
+
+        return prev.map((camera) =>
+          String(camera.id) === String(data.event.camera_id)
+            ? { ...camera, ...data.camera }
+            : camera
+        );
+      });
+      }
 
       } catch {
         data = null

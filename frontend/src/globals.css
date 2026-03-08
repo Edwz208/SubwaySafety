@@ -1,16 +1,29 @@
 @import "tailwindcss";
 
 @theme {
---color-primary: #DA291C;       /* TTC Red */
---color-secondary: #8B0000;     /* Dark transit red */
---color-background: #F4F4F4;    /* Light station background */
---color-border: #D9D9D9;        /* Divider / UI border */
---color-text-primary: #222222;  /* Dark readable text */
---color-card-surface: #FFFFFF;  /* Cards / panels */
---color-accent: #DA291C;        /* Primary accent */
---color-error: #D32F2F;         /* Alert red */
---color-success: #2E7D32;       /* Transit green indicator */
---color-dark: #000000;          /* Pure black for high contrast */
+  /* Core UI */
+  --color-background: #F5F6F8;      /* Station UI background */
+  --color-card-surface: #FFFFFF;    /* Cards / panels */
+  --color-border: #E2E5EA;          /* Dividers */
+  
+  /* Text */
+  --color-text-primary: #1F2933;    /* Main readable text */
+  --color-text-secondary: #6B7280;  /* Secondary text */
+
+  /* Accent / Interactive */
+  --color-accent: #2563EB;          /* Dashboard actions (blue) */
+  --color-primary: #1F2933;         /* Dark header text */
+
+  /* Status Colors */
+  --color-danger: #DA291C;          /* TTC emergency red */
+  --color-warning: #F59E0B;         /* Suspicious activity */
+  --color-success: #16A34A;         /* Clear / safe */
+  --color-info: #2563EB;            /* Camera active */
+
+  /* Special UI */
+  --color-camera-active: #2563EB;
+  --color-camera-offline: #9CA3AF;
+  --color-event-highlight: #FFF4F4; /* background for danger events */
 }
 
 @layer base {
@@ -39,9 +52,7 @@
   width: 8px;
 }
 
-
-
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 4px;
+  background: #D1D5DB;
+  border-radius: 6px;
 }

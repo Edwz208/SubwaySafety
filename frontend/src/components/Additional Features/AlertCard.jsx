@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { acknowledgeAlert } from "../api/incidentApi";
+import { acknowledgeAlert } from "../../api/incidentApi";
 
 // ─────────────────────────────────────────────
 // WHAT IS A COMPONENT?

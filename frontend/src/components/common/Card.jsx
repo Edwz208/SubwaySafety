@@ -3,7 +3,7 @@ function borderClasses(border) {
 }
 
 function bgClasses(bg) {
-  return bg === "card" ? "bg-white" : "bg-background";
+  return bg === "card" ? "bg-card-surface" : "bg-background";
 }
 
 function paddingClasses(p) {

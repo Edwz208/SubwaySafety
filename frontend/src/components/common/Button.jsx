@@ -40,51 +40,39 @@ export function Button({
   if (fullWidth) classes.push("w-full")
 
   /* ---------- Variants ---------- */
+if (variant === "primary") {
+  classes.push(
+    "bg-accent text-white",
+    "hover:opacity-90",
+    "focus-visible:ring-accent"
+  )
+}
 
-  if (variant === "primary") {
-    classes.push(
-      "bg-primary text-white",
-      "hover:opacity-90",
-      "focus-visible:ring-primary"
-    )
-  }
+if (variant === "outline") {
+  classes.push(
+    "border border-border",
+    "text-primary",
+    "bg-card-surface",
+    "hover:bg-border/20",
+    "focus-visible:ring-border"
+  )
+}
 
-  if (variant === "outline-black") {
-    classes.push(
-      "border border-primary",
-      "text-primary",
-      "hover:bg-surface",
-      "focus-visible:ring-primary",
-      "bg-white"
-    )
-  }
+if (variant === "danger") {
+  classes.push(
+    "bg-danger text-white",
+    "hover:opacity-90",
+    "focus-visible:ring-danger"
+  )
+}
 
-  if (variant === "outline-gray") {
-    classes.push(
-      "border border-border",
-      "text-primary",
-      "hover:bg-border/20",
-      "focus-visible:ring-border"
-    )
-  }
-
-  if (variant === "danger") {
-    classes.push(
-      "border border-danger_surface",
-      "text-danger",
-      "hover:bg-danger_surface/20",
-      "focus-visible:ring-danger_surface"
-    )
-  }
-
-  if (variant === "success") {
-    classes.push(
-      "border border-success",
-      "bg-success text-white",
-      "hover:opacity-90",
-      "focus-visible:ring-success"
-    )
-  }
+if (variant === "success") {
+  classes.push(
+    "bg-success text-white",
+    "hover:opacity-90",
+    "focus-visible:ring-success"
+  )
+}
 
   if (className) classes.push(className)
 
