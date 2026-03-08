@@ -1,9 +1,8 @@
 # alert.py
 # Handles WebSocket connections AND fires Gemini alerts when camera_worker detects events.
 
-from schemas.event import EventCreate
-
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter, HTTPException, status, Depends
+from schemas.event import EventCreate
 from typing import Any
 import json
 import asyncio
@@ -54,40 +53,27 @@ manager = ConnectionManager()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ORIGINAL send_alert — kept for backwards compatibility
-# Used by test_alert and any existing code that calls send_alert()
+# send_alert — thin wrapper around dispatch_alert for backwards compatibility
 # ─────────────────────────────────────────────────────────────────────────────
+
 def send_alert(alert_data: dict[str, Any]):
-    """Thin wrapper — kept for test_alert endpoint compatibility."""
     dispatch_alert(
-        track_id  = 0,
         events    = [alert_data.get("event", {}).get("event_type", "UNKNOWN")],
-        severity  = "low",
         clip_file = None,
         camera_id = str(alert_data.get("event", {}).get("camera_id", "unknown")),
-        location  = alert_data.get("event", {}).get("name", "Unknown"),
     )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# NEW dispatch_alert — called by camera_worker when a critical event fires
-# Adds Gemini text summary + video analysis + clip_file to the alert payload
+# dispatch_alert — called by camera_worker when a critical event fires
 # ─────────────────────────────────────────────────────────────────────────────
 
 def dispatch_alert(
-    track_id:  int,
     events:    list[str],
-    severity:  str,
-    clip_file: str,
+    clip_file: str | None,
     camera_id: str,
-    location:  str = "Unknown",
 ):
-    """
-    Called by camera_worker.py when a critical event is detected.
-    1. Generates Gemini text summary (with cooldown)
-    2. Starts background thread for video analysis
-    3. Broadcasts full alert payload to all connected dashboards
-    """
-    print(f"[alert] Dispatching alert: {events} | {severity} | camera={camera_id}")
+    print(f"[alert] Dispatching alert: {events} | camera={camera_id}")
 
     from services.gemini import analyze_incident, analyze_video_direct
     from detection.clip_recorder import CLIPS_DIR
@@ -97,24 +83,23 @@ def dispatch_alert(
     now = time.time()
 
     if now - _last_gemini_time < GEMINI_COOLDOWN_SECONDS:
-        gemini_message = f"{severity.upper()} alert: {', '.join(events)} detected at {location}."
+        gemini_message = f"CRITICAL alert: {', '.join(events)} detected at {camera_id}."
         print(f"[alert] Gemini skipped (cooldown) — using fallback message")
     else:
         _last_gemini_time = now
         try:
             gemini_message = analyze_incident(
                 event_type = events[0] if events else "UNKNOWN",
-                severity   = severity,
-                location   = location,
+                severity   = "critical",
+                location   = camera_id,
                 camera_id  = camera_id,
                 details    = {
-                    "track_id":   track_id,
                     "all_events": ", ".join(events),
                 },
             )
             print(f"[alert] Gemini text: {gemini_message}")
         except Exception as e:
-            gemini_message = f"{severity.upper()} alert: {', '.join(events)} detected at {location}."
+            gemini_message = f"CRITICAL alert: {', '.join(events)} detected at {camera_id}."
             print(f"[alert] Gemini failed, using fallback: {e}")
 
     # ── Step 1b: Video analysis in background after clip finishes ─────────────
@@ -134,23 +119,21 @@ def dispatch_alert(
     if clip_file:
         threading.Thread(target=analyze_clip_later, daemon=True).start()
 
-    # ── Step 2: Build payload ─────────────────────────────────────────────────
-# ── Step 2: Build payload using schema ────────────────────────────────────
+    # ── Step 2: Build payload — schema is the single source of truth ──────────
     event = EventCreate(
         camera_id       = camera_id,
         event_type      = events[0] if events else "UNKNOWN",
+        message         = gemini_message,
         video_clip_path = clip_file,
     )
 
     payload = json.dumps({
         "type":      "alert",
         "event":     event.model_dump(),
-        "severity":  severity,
-        "message":   gemini_message,
-        "location":  location,
-        "track_id":  track_id,
         "timestamp": time.time(),
-    })    # ── Step 3: Broadcast to all connected dashboards ─────────────────────────
+    })
+
+    # ── Step 3: Broadcast to all connected dashboards ─────────────────────────
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -179,7 +162,7 @@ async def stream_connection(websocket: WebSocket):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST ENDPOINT — hit GET /test_alert to verify WebSocket works
+# TEST ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/test_alert")
@@ -187,12 +170,12 @@ async def test_alert():
     sample_alert = {
         "type": "event",
         "event": {
-            "id":         "123e4567-e89b-12d3-a456-426614174000",
-            "name":       "King St Entrance",
-            "camera_id":  "3",
-            "event_type": "aggression",
+            "id":          "123e4567-e89b-12d3-a456-426614174000",
+            "name":        "King St Entrance",
+            "camera_id":   "3",
+            "event_type":  "aggression",
             "description": "aggression detected at King St Entrance",
-            "created_at": "2024-06-01T12:34:56Z",
+            "created_at":  "2024-06-01T12:34:56Z",
         }
     }
     send_alert(sample_alert)
