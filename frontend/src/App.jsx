@@ -15,6 +15,7 @@ function App() {
       // Only trigger red screen when backend sends type === "event"
       if (data?.type === 'event') {
         setAlert(data.event)
+        console.log("alerted")
 
         // Beep using Web Audio API — no library or file needed
         try {
@@ -88,13 +89,6 @@ function App() {
         `}</style>
       </div>
     )}
-  </>)
-}
-
-export default App
-      </main>
-    </div>
-    <Footer />
   </>)
 }
 

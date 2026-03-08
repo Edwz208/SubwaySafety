@@ -44,6 +44,7 @@ export default function useWebSocket(
       let data = e.data;
       try {
         data = JSON.parse(e.data);
+        onMessage(data)
         if (firstMessageRef.current){
         firstMessageRef.current = false
       }
