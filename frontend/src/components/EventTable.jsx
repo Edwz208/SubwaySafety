@@ -1,23 +1,46 @@
+import { useQuery } from "@tanstack/react-query"
 import FeatureCard from "./common/FeatureCard"
 import DataTable from "./common/DataTable"
+import publicClient from "../api/publicClient"
 
-const events = [
-  {
-    id: 1,
-    camera_id: 1,
-    occurred_at: "2024-06-01T12:00:00Z",
-    event_type: "Intrusion",
-    video_clip_path: "/path/to/video1.mp4",
-    description: "Person detected in restricted area"
-  }
-]
+function useFetchEvents(){
+    const axios = publicClient
+    return useQuery({
+        queryKey: ['events'], 
+        staleTime: 2*60*1000,
+        refetchOnMount: true,
+        refetchOnWindowFocus: true,
+        refetchOnReconnect: true,
+        
+        queryFn: async () => {
+                const response = await axios.get('/events') 
+                return response.data;
+        }
+    })
+}
+
+function useFetchCameras(){
+    const axios = publicClient
+    return useQuery({
+        queryKey: ['cameras'], 
+        staleTime: 2*60*1000,
+        refetchOnMount: true,
+        refetchOnWindowFocus: true,
+        refetchOnReconnect: true,
+        
+        queryFn: async () => {
+                const response = await axios.get('/cameras') 
+                return response.data;
+        }
+    })
+}
 
 const columns = [
   {
     key: "camera",
     header: "Camera",
     width: "120px",
-    cell: (row) => row.camera_id
+    cell: (row) => row.id
   },
   {
     key: "time",
@@ -40,17 +63,20 @@ const columns = [
 ]
 
 export default function EventTableCard() {
+  const { data: events = [], isLoading } = useFetchEvents()
+  const { data: cameras = [] } = useFetchCameras()
+
   return (
     <FeatureCard
       title="Recent Events"
       showHeaderDivider
-      className='mt-10'
+      className="mt-10"
     >
       <DataTable
         columns={columns}
         rows={events}
         getRowKey={(row) => row.id}
-        emptyState="No events detected."
+        emptyState={isLoading ? "Loading events..." : "No events detected."}
       />
     </FeatureCard>
   )

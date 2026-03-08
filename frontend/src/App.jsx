@@ -13,6 +13,7 @@ function App() {
   useAlertWS({
     onMessage: (data) => {
       // Only trigger red screen when backend sends type === "event"
+      console.log(data)
       if (data?.type === 'event') {
         setAlert(data.event)
         console.log("alerted")

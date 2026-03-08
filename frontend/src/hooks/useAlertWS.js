@@ -49,15 +49,17 @@ export default function useWebSocket(
         firstMessageRef.current = false
       }
       console.log(data)
-    const cameraId = data?.event?.camera_id;
-    if (data?.type === "event" && cameraId) {
+    if (data?.type === "event") {
       queryClient.setQueryData(['cameras'], (prev) =>
         prev?.map((camera) =>
-        String(camera.id) === String(data.event.camera_id)
-            ? { ...camera, is_detected: true }
+          String(camera.id) === String(data.event.camera_id)
+            ? {
+                ...camera,
+                last_detected_at: data.event.occurred_at ?? new Date().toISOString(),
+              }
             : camera
         )
-      );
+      )
     }
       else if (data?.type === "camera"){
       queryClient.setQueryData(['cameras'], (prev) => {

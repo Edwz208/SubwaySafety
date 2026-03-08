@@ -2,6 +2,8 @@ import FeatureCard from "../common/FeatureCard";
 import { useQuery } from "@tanstack/react-query";
 import publicClient from '../../api/publicClient'
 import useAlertWS from "../../hooks/useAlertWS";
+import Stream from "./Stream";
+import { formatTimestamp } from "../../utils/validators";
 
 function useFetchCameras(){
     const axios = publicClient
@@ -32,6 +34,7 @@ function CameraGrid({ onSelectCamera }) {
         return <p>Error: {errorMessage}</p>}
     if (isLoading) return <div>Loading cameras...</div>
     const cameras = data || []
+    
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
       {cameras.map((camera) => (
@@ -46,21 +49,13 @@ function CameraGrid({ onSelectCamera }) {
           }}
         >
           <div className="flex flex-col gap-2">
-            <video
-                autoPlay
-                loop
-                muted
-                playsInline
-                className="w-full h-full object-cover rounded-xl"
-                >
-            <source src="https://www.w3schools.com/html/mov_bbb.mp4" type="video/mp4" />
-            </video>
+            <Stream />
             <p className="text-sm text-muted">
               {camera.location}
             </p>
 
             <p className="text-sm">
-              Status: {camera.is_detected ? "⚠️ Detection" : "✅ Clear"}
+              Last Detection: {formatTimestamp(camera.last_detected_at)}
             </p>
 
             <p className="text-sm">

@@ -1,57 +1,70 @@
 import { useEffect, useRef } from "react";
 
-export default function WebRTCPlayer({ streamUrl }) {
+export default function Stream() {
   const videoRef = useRef(null);
+  const pcRef = useRef(null);
 
   useEffect(() => {
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-    });
-
-    const stream = new MediaStream();
-
-    videoRef.current.srcObject = stream;
-
-    pc.ontrack = (event) => {
-      stream.addTrack(event.track);
-    };
+    let stopped = false;
 
     async function start() {
-      const offer = await pc.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: true
-      });
+      const pc = new RTCPeerConnection();
+      pcRef.current = pc;
 
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+
+      pc.ontrack = (event) => {
+        if (!videoRef.current) return;
+        videoRef.current.srcObject = event.streams[0];
+      };
+
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const res = await fetch(streamUrl, {
+      const res = await fetch("http://155.138.128.95:8889/live/phone/whep", {
         method: "POST",
         headers: {
-          "Content-Type": "application/sdp"
+          "Content-Type": "application/sdp",
         },
-        body: offer.sdp
+        body: offer.sdp,
       });
 
-      const answer = await res.text();
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`WHEP POST failed: ${res.status} ${text}`);
+      }
+
+      const answerSdp = await res.text();
+
+      if (stopped) return;
 
       await pc.setRemoteDescription({
         type: "answer",
-        sdp: answer
+        sdp: answerSdp,
       });
     }
 
-    start();
+    start().catch((err) => {
+      console.error("Failed to start stream:", err);
+    });
 
-    return () => pc.close();
-  }, [streamUrl]);
+    return () => {
+      stopped = true;
+      if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <video
       ref={videoRef}
       autoPlay
       playsInline
-      controls
-      className="w-full h-full"
+      muted
+      className="w-full h-full object-cover rounded-xl bg-black"
     />
   );
 }
