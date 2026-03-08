@@ -36,8 +36,8 @@ CFG = {
     "HISTORY_WINDOW_SECONDS":    15,
 
     # Erratic movement (normalized — scale invariant)
-    "ERRATIC_MIN_DELTA_NORM":    0.02,
-    "ERRATIC_CV_THRESHOLD":      0.65,
+    "ERRATIC_MIN_DELTA_NORM":    0.05,
+    "ERRATIC_CV_THRESHOLD":      0.85,
 
     # Punch detection — requires BOTH speed AND arm extension to avoid
     # false positives from normal walking/running
@@ -188,8 +188,13 @@ def detect_lying_down(
             y_gap    = abs(float(np.mean(shoulder_ys)) - float(np.mean(hip_ys)))
             signal_c = x_spread > box_w * 0.5 and y_gap < box_h * 0.3
 
-    if not (signal_a or signal_b or signal_c):
-        return False, 0.0, {}
+    # Require BOTH aspect ratio AND keypoint spread — one alone causes false triggers
+    if camera_angle == "horizontal":
+        if not (signal_a and signal_b):
+            return False, 0.0, {}
+    else:
+        if not (signal_b or signal_c):
+            return False, 0.0, {}
 
     signal_count = sum([signal_a, signal_b, signal_c])
     confidence = (
@@ -296,7 +301,7 @@ def detect_aggression(
     # Hard speed gate — must clear this or we don't even check geometry
     # 1.5 = wrist travels 1.5x body height per second
     # Normal walking wrist swing: ~0.3-0.6. Fast arm wave: ~0.8. Punch: 1.5+
-    SPEED_THRESH = 1.5
+    SPEED_THRESH = 2.0
     if wrist_speed_norm < SPEED_THRESH:
         return False, 0.0, {}
 
@@ -323,7 +328,7 @@ def detect_aggression(
         (r_wrist[0],    r_wrist[1]),
     ) if right_chain else None
 
-    ANGLE_THRESH   = 140  # degrees — lowered slightly since speed gate is now strict
+    ANGLE_THRESH   = 155  # degrees — lowered slightly since speed gate is now strict
     left_extended  = left_angle  is not None and left_angle  > ANGLE_THRESH
     right_extended = right_angle is not None and right_angle > ANGLE_THRESH
 
