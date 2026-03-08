@@ -1,6 +1,8 @@
 # alert.py
 # Handles WebSocket connections AND fires Gemini alerts when camera_worker detects events.
 
+from schemas.event import EventCreate
+
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter, HTTPException, status, Depends
 from typing import Any
 import json
@@ -55,12 +57,16 @@ manager = ConnectionManager()
 # ORIGINAL send_alert — kept for backwards compatibility
 # Used by test_alert and any existing code that calls send_alert()
 # ─────────────────────────────────────────────────────────────────────────────
-
 def send_alert(alert_data: dict[str, Any]):
-    message = json.dumps(alert_data)
-    print(f"Broadcasting alert: {message}")
-    asyncio.create_task(manager.broadcast(message))
-
+    """Thin wrapper — kept for test_alert endpoint compatibility."""
+    dispatch_alert(
+        track_id  = 0,
+        events    = [alert_data.get("event", {}).get("event_type", "UNKNOWN")],
+        severity  = "low",
+        clip_file = None,
+        camera_id = str(alert_data.get("event", {}).get("camera_id", "unknown")),
+        location  = alert_data.get("event", {}).get("name", "Unknown"),
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NEW dispatch_alert — called by camera_worker when a critical event fires
@@ -129,19 +135,22 @@ def dispatch_alert(
         threading.Thread(target=analyze_clip_later, daemon=True).start()
 
     # ── Step 2: Build payload ─────────────────────────────────────────────────
+# ── Step 2: Build payload using schema ────────────────────────────────────
+    event = EventCreate(
+        camera_id       = camera_id,
+        event_type      = events[0] if events else "UNKNOWN",
+        video_clip_path = clip_file,
+    )
+
     payload = json.dumps({
         "type":      "alert",
-        "camera_id": camera_id,
+        "event":     event.model_dump(),
+        "severity":  severity,
+        "message":   gemini_message,
         "location":  location,
         "track_id":  track_id,
-        "events":    events,
-        "severity":  severity,
-        "clip_file": clip_file,
-        "message":   gemini_message,
         "timestamp": time.time(),
-    })
-
-    # ── Step 3: Broadcast to all connected dashboards ─────────────────────────
+    })    # ── Step 3: Broadcast to all connected dashboards ─────────────────────────
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
