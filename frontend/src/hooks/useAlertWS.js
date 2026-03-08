@@ -115,7 +115,3 @@ export default function useWebSocket(
 
   return ({ isOpen: readyState === WebSocket.OPEN });
 }
-  }, [connect]);
-
-  return ({isOpen: readyState === WebSocket.OPEN});
-}
