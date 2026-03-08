@@ -286,8 +286,13 @@ def detect_aggression(
 
     # Reads from CFG — previously this was hardcoded and ignored CFG entirely
     SPEED_THRESH = CFG["PUNCH_WRIST_SPEED_NORM"]
-    if wrist_speed_norm < SPEED_THRESH:
+    raw_px_moved = wrist_speed_norm * box_h * time_span
+    if raw_px_moved < 40 or wrist_speed_norm < SPEED_THRESH:
         return False, 0.0, {}
+
+# Raw pixel sanity check — wrist must move at least 40px in 0.25s
+# This stops close-range perspective jitter from passing the speed gate
+    
 
     # ── Step 2: Arm extension gate — verify elbow is actually extended ────────
     l_shoulder = kp(keypoints, 5)
@@ -504,6 +509,7 @@ def run_all_classifiers(
         "severity": severity,
         "details":  details,
     }
+
 
 
 
