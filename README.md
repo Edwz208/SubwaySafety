@@ -107,40 +107,6 @@ python test_phone.py
 
 ---
 
-## Project structure
-
-```
-backend/
-  app/
-    detection/
-      camera_worker.py     main detection pipeline
-      classifiers.py       event detection logic and thresholds
-      clip_recorder.py     rolling buffer and .avi clip saving
-      model.py             YOLOv8 loader
-      annotator.py         draws overlays on frames
-      tracker.py           per-person motion history
-    routers/
-      alert.py             WebSocket manager and Gemini dispatch
-      clips.py             serves clip files to the frontend
-      stream.py            camera stream registration
-      stream_feed.py       live MJPEG stream endpoint
-    services/
-      gemini.py            Gemini text and video analysis
-    schemas/
-      event.py             Pydantic event schema
-  test_visual.py           run detection on webcam
-  test_phone.py            run detection on phone camera
-  clips/                   saved incident clips (.avi)
-frontend/
-  src/
-    components/
-      AlertNotification.jsx   alert popup with video
-    store/
-      alertStore.js           Zustand alert state
-```
-
----
-
 ## API reference
 
 | Method | Endpoint | Description |
