@@ -1,4 +1,4 @@
-# Transit Guardian
+# WatchLine
 
 AI-powered subway safety detection system that monitors live camera feeds, detects dangerous situations in real time, and instantly alerts station staff with video evidence and an AI-generated dispatch message.
 
