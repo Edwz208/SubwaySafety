@@ -19,4 +19,3 @@ class CameraRead(BaseModel):
     name: str
     url: str | None = None # change to not None
     location: str | None = None
-    is_detected: bool

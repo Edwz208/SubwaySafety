@@ -10,5 +10,4 @@ class Camera(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_detected: Mapped[bool] = mapped_column(default=False, nullable=False)
     events = relationship("Event", back_populates="camera", cascade="all, delete-orphan")
